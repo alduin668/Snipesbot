@@ -1,0 +1,241 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SnipesBot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>🎯 SnipesBot</h1>
+    <div id="meta">loading…</div>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="livelog">Live Log</button>
+      <button class="tab-btn" data-tab="review">Review Queue</button>
+      <button class="tab-btn" data-tab="manual">Manual Decisions</button>
+      <button class="tab-btn" data-tab="special">Special</button>
+      <button class="tab-btn" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="dns">Do Not Snipe</button>
+      <button class="tab-btn" data-tab="analysis">Analysis</button>
+      <button class="tab-btn" data-tab="matrix">Matrix</button>
+      <button class="tab-btn" data-tab="adjustments">Adjustments</button>
+      <button class="tab-btn" data-tab="scripts">Scripts</button>
+    </div>
+  </header>
+
+  <div id="tab-livelog" class="tab-content active">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="body"></tbody>
+    </table>
+    <div id="empty" style="display:none">No snipes recorded yet.</div>
+  </div>
+
+  <div id="tab-review" class="tab-content">
+    <div class="review-controls">
+      <button class="btn" id="refresh-review">Refresh queue</button>
+      <label class="review-mode-label">Show:
+        <select id="review-page-size">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="all">All</option>
+          <option value="1">One at a time</option>
+        </select>
+      </label>
+      <div id="review-nav" class="review-nav" style="display:none">
+        <button class="btn" id="review-prev">← Prev</button>
+        <span id="review-position"></span>
+        <button class="btn" id="review-next">Next →</button>
+      </div>
+      <div id="review-pager" class="review-pager" style="display:none">
+        <button class="btn" id="review-page-prev">← Prev page</button>
+        <span id="review-page-info"></span>
+        <button class="btn" id="review-page-next">Next page →</button>
+      </div>
+    </div>
+    <div id="review-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-manual" class="tab-content">
+    <div class="review-controls">
+      <button class="btn" id="refresh-manual">Refresh</button>
+      <label class="review-mode-label">Show:
+        <select id="manual-page-size">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="all">All</option>
+          <option value="1">One at a time</option>
+        </select>
+      </label>
+      <div id="manual-nav" class="review-nav" style="display:none">
+        <button class="btn" id="manual-prev">← Prev</button>
+        <span id="manual-position"></span>
+        <button class="btn" id="manual-next">Next →</button>
+      </div>
+      <div id="manual-pager" class="review-pager" style="display:none">
+        <button class="btn" id="manual-page-prev">← Prev page</button>
+        <span id="manual-page-info"></span>
+        <button class="btn" id="manual-page-next">Next page →</button>
+      </div>
+      <span class="review-mode-label">Every entry Zeke has manually decided -- resolve, re-classify, or correct any of them here.</span>
+    </div>
+    <div id="manual-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-special" class="tab-content">
+    <div class="review-controls">
+      <button class="btn" id="refresh-special">Refresh</button>
+      <span class="review-mode-label">Photos flagged :fingerprint: -- too niche for the detector. Build whatever snipe/snope/NAS/missnipe record(s) fit, with any sniper/sniped name (a real person or anything else -- type a custom name if there's no real match).</span>
+    </div>
+    <div id="special-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-search" class="tab-content">
+    <div class="search-filters">
+      <div class="filter-group">
+        <label>Kind</label>
+        <div class="kind-checks">
+          <label><input type="checkbox" class="search-kind" value="snipe" checked> Snipe</label>
+          <label><input type="checkbox" class="search-kind" value="snope" checked> Snope</label>
+          <label><input type="checkbox" class="search-kind" value="likely_snipe" checked> Likely snipe</label>
+          <label><input type="checkbox" class="search-kind" value="unidentified" checked> Unidentified</label>
+          <label><input type="checkbox" class="search-kind" value="not_a_snipe" checked> NAS</label>
+          <label><input type="checkbox" class="search-kind" value="incorrect_snipe" checked> Missnipe</label>
+          <label><input type="checkbox" class="search-kind" value="special" checked> Special</label>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label for="search-sniper">Sniper</label>
+        <select id="search-sniper"><option value="">Any</option></select>
+      </div>
+      <div class="filter-group">
+        <label for="search-sniped">Sniped (victim)</label>
+        <select id="search-sniped"><option value="">Any</option></select>
+      </div>
+      <div class="filter-group">
+        <label for="search-time">Time of day</label>
+        <select id="search-time">
+          <option value="">Any</option>
+          <option value="morning">Morning (5am-12pm)</option>
+          <option value="afternoon">Afternoon (12-5pm)</option>
+          <option value="evening">Evening (5-9pm)</option>
+          <option value="night">Night (9pm-5am)</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="search-day">Day of week</label>
+        <select id="search-day">
+          <option value="">Any</option>
+          <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+          <option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="search-notable">Starred</label>
+        <select id="search-notable">
+          <option value="">Any</option>
+          <option value="1">Starred only</option>
+          <option value="0">Not starred</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="search-manual">Decision</label>
+        <select id="search-manual">
+          <option value="">Any</option>
+          <option value="1">Manual only</option>
+          <option value="0">Automatic only</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="search-q">Caption contains</label>
+        <input type="text" id="search-q" placeholder="text in caption…">
+      </div>
+    </div>
+    <div class="review-controls" style="margin-top:12px">
+      <button class="btn primary" id="search-run">Search</button>
+      <button class="btn" id="search-clear">Clear filters</button>
+      <span id="search-count" class="review-mode-label"></span>
+      <label class="review-mode-label">Show:
+        <select id="search-page-size">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="all">All</option>
+          <option value="1">One at a time</option>
+        </select>
+      </label>
+      <div id="search-nav" class="review-nav" style="display:none">
+        <button class="btn" id="search-prev">← Prev</button>
+        <span id="search-position"></span>
+        <button class="btn" id="search-next">Next →</button>
+      </div>
+      <div id="search-pager" class="review-pager" style="display:none">
+        <button class="btn" id="search-page-prev">← Prev page</button>
+        <span id="search-page-info"></span>
+        <button class="btn" id="search-page-next">Next page →</button>
+      </div>
+    </div>
+    <div id="search-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-dns" class="tab-content">
+    <div class="review-controls">
+      <button class="btn" id="refresh-dns">Refresh</button>
+      <div class="chip-input" style="flex:1; min-width:260px;">
+        <input type="text" class="chip-search" id="dns-add-search" placeholder="Add someone to the do-not-snipe list…" autocomplete="off" style="flex:1;">
+        <div class="chip-dropdown" id="dns-add-dropdown"></div>
+      </div>
+    </div>
+    <div id="dns-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-analysis" class="tab-content">
+    <button class="btn" id="refresh-analysis">Run fresh analysis</button>
+    <div id="analysis-body" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-matrix" class="tab-content">
+    <div class="review-controls">
+      <div class="matrix-subtabs">
+        <button class="matrix-subtab-btn active" data-matrix="coded">Coded</button>
+        <button class="matrix-subtab-btn" data-matrix="manual">Manual</button>
+        <button class="matrix-subtab-btn" data-matrix="true">True</button>
+      </div>
+      <button class="btn" id="refresh-matrix">Refresh</button>
+      <label class="review-mode-label">Zoom
+        <input type="range" id="matrix-zoom" min="60" max="160" value="100" step="10">
+      </label>
+    </div>
+    <div id="matrix-caption" class="review-mode-label" style="margin-top:8px"></div>
+    <div id="matrix-wrap" class="matrix-scroll" style="margin-top:8px"></div>
+  </div>
+
+  <div id="tab-adjustments" class="tab-content">
+    <div class="review-controls">
+      <button class="btn" id="refresh-adjustments">Refresh</button>
+      <span class="review-mode-label">Manual per-person score adjustments -- added directly to Score alongside True's Snipes/Sniped. Edit and click away to save.</span>
+    </div>
+    <div id="adjustments-list" style="margin-top:14px"></div>
+  </div>
+
+  <div id="tab-scripts" class="tab-content">
+    <div id="scripts-list"></div>
+    <div class="console" id="scripts-console" style="display:none"></div>
+  </div>
+
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-panel">
+      <button type="button" class="modal-close" id="modal-close">×</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

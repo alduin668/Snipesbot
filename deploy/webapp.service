@@ -1,0 +1,15 @@
+[Unit]
+Description=SnipesBot Live Log Webapp
+After=network.target
+
+[Service]
+Type=simple
+User=slackbot
+WorkingDirectory=/opt/slackbot/snipesbot
+EnvironmentFile=/opt/slackbot/snipesbot/.env
+ExecStart=/opt/slackbot/venv/bin/python /opt/slackbot/snipesbot/webapp.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
