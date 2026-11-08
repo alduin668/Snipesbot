@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# runtime data: database, archive, exports
+data/
+*.db
+*.db-wal
+*.db-shm
+*.xlsx
+
+# frontend test tooling
+tests/frontend/node_modules/

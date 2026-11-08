@@ -1,11 +1,12 @@
 [Unit]
-Description=SnipesBot Live Log Webapp
+Description=SnipesBot admin webapp
 After=network.target
 
 [Service]
 Type=simple
 User=slackbot
 WorkingDirectory=/opt/slackbot/snipesbot
+# Put WEBAPP_PASSWORD (and WEBAPP_HOST if not loopback) in this file.
 EnvironmentFile=/opt/slackbot/snipesbot/.env
 ExecStart=/opt/slackbot/venv/bin/python /opt/slackbot/snipesbot/webapp.py
 Restart=on-failure

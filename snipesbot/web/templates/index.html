@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SnipesBot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>🎯 SnipesBot</h1>
+    <div id="meta">loading…</div>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="livelog">Live Log</button>
+      <button class="tab-btn" data-tab="review">Review Queue</button>
+      <button class="tab-btn" data-tab="manual">Manual Decisions</button>
+      <button class="tab-btn" data-tab="special">Special</button>
+      <button class="tab-btn" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="dns">Do Not Snipe</button>
+      <button class="tab-btn" data-tab="analysis">Analysis</button>
+      <button class="tab-btn" data-tab="matrix">Matrix</button>
+      <button class="tab-btn" data-tab="adjustments">Adjustments</button>
+      <button class="tab-btn" data-tab="maintenance">Maintenance</button>
+    </nav>
+  </header>
+
+  <section id="tab-livelog" class="tab-content active"></section>
+  <section id="tab-review" class="tab-content"></section>
+  <section id="tab-manual" class="tab-content"></section>
+  <section id="tab-special" class="tab-content"></section>
+  <section id="tab-search" class="tab-content"></section>
+  <section id="tab-dns" class="tab-content"></section>
+  <section id="tab-analysis" class="tab-content"></section>
+  <section id="tab-matrix" class="tab-content"></section>
+  <section id="tab-adjustments" class="tab-content"></section>
+  <section id="tab-maintenance" class="tab-content"></section>
+
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-panel">
+      <button type="button" class="modal-close" id="modal-close" aria-label="Close">×</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

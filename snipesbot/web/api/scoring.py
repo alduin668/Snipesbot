@@ -1,0 +1,121 @@
+"""Matrix, adjustments and the Analysis tab."""
+from __future__ import annotations
+
+from flask import Blueprint, jsonify, request
+
+from ...analysis.stats import Stats
+from ...services import people
+from ..deps import env
+
+bp = Blueprint("scoring", __name__)
+
+
+def _roster(stats: Stats) -> list:
+    """Everyone with a name, in the matrices, or with an adjustment -- ordered by
+    True row total then name, so all matrix views and the Adjustments tab line up."""
+    names = env().store.names.all()
+    true = stats.true_matrix()
+    users = set(names) | set(stats.coded_matrix()["users"]) | set(true["users"]) | set(stats.adjustments)
+    return sorted(users, key=lambda u: (-true["row_totals"].get(u, 0), (names.get(u) or u).lower()))
+
+
+def _matrix_json(stats, order, row_totals, col_totals, cells, editable):
+    names = env().store.names.all()
+    return jsonify({
+        "users": [{"id": u, "display": people.display(u, names)} for u in order],
+        "row_totals": {u: row_totals.get(u, 0) for u in order},
+        "col_totals": {u: col_totals.get(u, 0) for u in order},
+        "cells": cells, "editable": editable,
+    })
+
+
+@bp.get("/matrix/<view>")
+def matrix(view):
+    stats = Stats(env())
+    order = _roster(stats)
+    if view == "coded":
+        m = stats.coded_matrix()
+        return _matrix_json(stats, order, m["row_totals"], m["col_totals"], m["cells"], False)
+    if view == "manual":
+        rows, cols = stats.manual_totals()
+        return _matrix_json(stats, order, rows, cols, stats.manual, True)
+    if view == "true":
+        m = stats.true_matrix()
+        return _matrix_json(stats, order, m["row_totals"], m["col_totals"], m["cells"], True)
+    return jsonify({"error": "unknown matrix"}), 404
+
+
+def _cell_args():
+    body = request.get_json(silent=True) or {}
+    sniper, victim = (body.get("sniper") or "").strip(), (body.get("victim") or "").strip()
+    if not sniper or not victim or sniper == victim:
+        return None, (jsonify({"error": "sniper and victim (and they must differ) are required"}), 400)
+    try:
+        return (sniper, victim, int(body.get("value", 0) or 0)), None
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "value must be a whole number"}), 400)
+
+
+@bp.post("/matrix/manual/cell")
+def set_manual_cell():
+    args, err = _cell_args()
+    if err:
+        return err
+    env().store.scoring.set_cell(*args)
+    return jsonify({"ok": True})
+
+
+@bp.post("/matrix/true/cell")
+def set_true_cell():
+    """Editing a True cell stores only the difference from the coded count in the
+    manual matrix, so Coded stays pure and Manual stays "what was changed by hand"."""
+    args, err = _cell_args()
+    if err:
+        return err
+    sniper, victim, value = args
+    coded = Stats(env()).coded_matrix()["cells"].get(sniper, {}).get(victim, 0)
+    env().store.scoring.set_cell(sniper, victim, value - coded)
+    return jsonify({"ok": True})
+
+
+@bp.get("/adjustments")
+def adjustments():
+    stats = Stats(env())
+    names = env().store.names.all()
+    return jsonify({"users": [
+        {"id": u, "display": people.display(u, names), "adjustment": stats.adjustments.get(u, 0)}
+        for u in _roster(stats)]})
+
+
+@bp.post("/adjustments")
+def set_adjustment():
+    body = request.get_json(silent=True) or {}
+    user_id = (body.get("user_id") or "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        value = float(body.get("adjustment", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "adjustment must be a number"}), 400
+    env().store.scoring.set_adjustment(user_id, value)
+    return jsonify({"ok": True})
+
+
+@bp.get("/analysis")
+def analysis():
+    stats = Stats(env())
+    names = env().store.names.all()
+    named = lambda d: {people.display(k, names): v for k, v in d.items()}  # noqa: E731
+    by_day, by_bucket = stats.peak_windows()
+    as_sniper, as_victim = stats.group_snipe_frequency()
+    return jsonify({
+        "leaderboard": [dict(r, user=people.display(r["user"], names)) for r in stats.leaderboard()],
+        "rivalries": [{"pair": [people.display(u, names) for u in pair], "count": n} for pair, n in stats.rivalries()],
+        "streaks": named(stats.streaks()),
+        "untouchable": named(stats.untouchable()),
+        "retaliation_speed": named(stats.retaliation_speed()),
+        "peak_by_day": by_day, "peak_by_bucket": by_bucket,
+        "notable_ratio": named(stats.notable_ratio()),
+        "group_snipe_as_sniper": named(as_sniper), "group_snipe_as_victim": named(as_victim),
+        "queue_size": stats.pending_count,
+    })

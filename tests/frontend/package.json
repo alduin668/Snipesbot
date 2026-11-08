@@ -1,0 +1,6 @@
+{
+  "name": "snipesbot-frontend-tests",
+  "private": true,
+  "type": "module",
+  "devDependencies": { "jsdom": "^26.0.0" }
+}
