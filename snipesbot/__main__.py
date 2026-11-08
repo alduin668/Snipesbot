@@ -5,6 +5,7 @@ Command line entry point:  python -m snipesbot <command>
     sync [--since YYYY-MM-DD] [--full] [--repair-reactions]
     export [PATH]                              write the .xlsx log
     stats                                      print the leaderboard
+    relink-files DIR                           reconnect photo files found under DIR
     diagnose                                   check Slack access and data
     selftest | selftest-clear                  post / remove synthetic test photos
     bot                                        run the Slack bot (same as app.py)
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config
 from .env import Env
-from .services import exports, legacy, maintenance
+from .services import exports, files, legacy, maintenance
 from .services import sync as sync_service
 from .slack_io import make_client
 from .store import Busy
@@ -73,6 +74,16 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_relink(args) -> int:
+    env = _env()
+    try:
+        report = files.relink_files(env, Path(args.directory))
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    return 0 if report.still_missing == 0 or report.linked else 1
+
+
 def cmd_task(key):
     def run(args) -> int:
         maintenance.TASKS[key].run(_env(), {}, print)
@@ -112,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.set_defaults(func=cmd_export)
 
     sub.add_parser("stats", help="print the leaderboard").set_defaults(func=cmd_stats)
+    r = sub.add_parser("relink-files", help="reconnect photo files that exist on disk but aren't linked")
+    r.add_argument("directory", help="folder to search recursively (e.g. the old data/ directory)")
+    r.set_defaults(func=cmd_relink)
     sub.add_parser("diagnose", help="check Slack access and data").set_defaults(func=cmd_task("diagnose"))
     sub.add_parser("selftest", help="post synthetic test photos").set_defaults(func=cmd_task("selftest"))
     sub.add_parser("selftest-clear", help="remove them").set_defaults(func=cmd_task("selftest_clear"))

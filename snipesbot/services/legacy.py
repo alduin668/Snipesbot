@@ -40,12 +40,17 @@ class ImportReport:
     files: int = 0
     demoted_malformed: int = 0
     converted_ignored: int = 0
+    missing_files: list = field(default_factory=list)    # paths the old index named but that weren't on disk
+    missing_photos: int = 0                              # entries whose photo couldn't be located at all
     notes: list = field(default_factory=list)
 
     def summary(self) -> str:
-        return (f"{self.entries} entries imported ({self.skipped} already present), "
+        text = (f"{self.entries} entries imported ({self.skipped} already present), "
                 f"{self.messages} archived messages, {self.files} files, "
                 f"{self.converted_ignored} legacy-ignored -> NAS, {self.demoted_malformed} malformed snipes demoted")
+        if self.missing_files or self.missing_photos:
+            text += f"; {len(self.missing_files)} archived file(s) and {self.missing_photos} photo(s) NOT FOUND"
+        return text
 
 
 def _load(path: Path, default):
@@ -110,7 +115,19 @@ def import_legacy(env: Env, legacy_dir: Path, progress: Progress = print) -> Imp
         store.tests.add(t["channel"], t["ts"], t.get("label", ""))
 
     progress(f"[migrate] {report.summary()}")
+    if report.missing_files or report.missing_photos:
+        progress(_missing_hint(legacy_dir, report))
     return report
+
+
+def _missing_hint(legacy_dir: Path, report: ImportReport) -> str:
+    lines = ["[migrate] WARNING: some photo files were not found, so those photos will show as missing.",
+             f"[migrate]   looked in: {legacy_dir / 'archive' / 'files'}  and  {legacy_dir / 'photos'}"]
+    for path in report.missing_files[:3]:
+        lines.append(f"[migrate]   e.g. the old index expected: {path}")
+    lines.append("[migrate]   If the files exist elsewhere, reconnect them with:  "
+                 "python -m snipesbot relink-files /path/to/the/old/data")
+    return "\n".join(lines)
 
 
 def _convert_entry(env: Env, legacy_dir: Path, raw: dict, report: ImportReport) -> Entry:
@@ -151,12 +168,14 @@ def _convert_entry(env: Env, legacy_dir: Path, raw: dict, report: ImportReport) 
 def _adopt_photo(env: Env, legacy_dir: Path, raw: dict, file: Optional[FileRef], report: ImportReport) -> None:
     """Old entries kept their own copy of the photo under photos/. If the archive
     doesn't already hold that file, adopt the copy so nothing is lost."""
-    if not file or env.store.archive.has_file(file.id) or not raw.get("photo_path"):
+    if not file or env.store.archive.has_file(file.id):
         return
-    src = _find_file(legacy_dir, raw["photo_path"], "photos")
+    src = _find_file(legacy_dir, raw.get("photo_path") or "", "photos")
     if src:
         env.store.archive.adopt_file(file.id, src, file.name or src.name, file.mimetype)
         report.files += 1
+    else:
+        report.missing_photos += 1
 
 
 def _import_archive(env: Env, legacy_dir: Path, report: ImportReport, progress: Progress) -> None:
@@ -171,6 +190,7 @@ def _import_archive(env: Env, legacy_dir: Path, report: ImportReport, progress: 
             continue
         src = _find_file(legacy_dir, info.get("path", ""), "archive", "files")
         if not src:
+            report.missing_files.append(info.get("path", "") or file_id)
             continue
         in_place = src.resolve().parent == env.cfg.archive_files_dir.resolve()
         if in_place:

@@ -16,7 +16,14 @@ so you can roll back by checking out the old code.
    Add `--recover-manuals` if you want the old "infer Zeke's manual decisions
    from his reactions" step (the old `migrate_manuals` script); it costs one
    Slack call per undecided photo.
-7. `python -m snipesbot sync` to catch up (safe to skip; the bot does it on start).
+   **Check the output for `NOT FOUND`.** If photo files weren't where the old
+   index said they were (e.g. you copied `snipes.json` but not `archive/` and
+   `photos/`, or the old index holds absolute paths from another machine) the
+   import says so and lists where it looked. Copy the files over and run
+   `python -m snipesbot relink-files <folder>`, or re-run `migrate` (it is
+   idempotent and will pick up files it missed).
+7. `python -m snipesbot diagnose` should show every photo found in the archive.
+   Then `python -m snipesbot sync` to catch up (safe to skip; the bot does it on start).
 8. Start the bot and webapp. Check the Live Log count matches what you expect;
    `python -m snipesbot stats` should show the leaderboard you had before.
 9. Once you're happy, `snipes.json`, `photos/`, `archive/*.json` and

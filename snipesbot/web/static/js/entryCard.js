@@ -35,16 +35,23 @@ export function filePlaceholder(f) {
   btn.addEventListener('click', () => {
     const media = el(f.is_video ? 'video' : 'img', { class: 'ctx-inline-img', src: `/api/files/${encodeURIComponent(f.id)}` });
     if (f.is_video) { media.controls = true; media.preload = 'metadata'; } else media.loading = 'lazy';
+    media.addEventListener('error', () => media.replaceWith(el('span', { class: 'img-hint', text: '(file unavailable)' })));
     btn.replaceWith(media);
   });
   return btn;
 }
 
-function photoEl(entry) {
+const MISSING_FILE = "This photo's file isn't in the archive (it may have aged out of Slack, or wasn't "
+  + 'copied over when migrating). On the server run:  python -m snipesbot diagnose';
+
+/** The entry's main photo/video, or a plain explanation when the file can't be served. */
+export function photoEl(entry) {
   if (!entry.photo_url) return el('div', { class: 'no-photo', text: 'No photo available for this one' });
   const media = el(entry.is_video ? 'video' : 'img', { src: entry.photo_url });
   if (entry.is_video) { media.controls = true; media.preload = 'metadata'; } else media.loading = 'lazy';
-  return el('div', { class: 'photo-wrap' }, media);
+  const wrap = el('div', { class: 'photo-wrap' }, media);
+  media.addEventListener('error', () => wrap.replaceWith(el('div', { class: 'no-photo', text: MISSING_FILE })));
+  return wrap;
 }
 
 /**

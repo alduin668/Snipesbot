@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { createChipInput } from '../chipInput.js';
-import { filePlaceholder } from '../entryCard.js';
+import { filePlaceholder, photoEl } from '../entryCard.js';
 import { el, empty, fromHtml, html, render } from '../dom.js';
 import { loadUsers } from '../users.js';
 
@@ -16,11 +16,7 @@ function card(entry, users, reload) {
       <div class="resolve-row"></div>
     </div>`);
   const media = node.querySelector('.media');
-  if (entry.photo_url) {
-    const m = el(entry.is_video ? 'video' : 'img', { src: entry.photo_url });
-    if (entry.is_video) m.controls = true; else m.loading = 'lazy';
-    media.append(el('div', { class: 'photo-wrap' }, m));
-  } else media.append(el('div', { class: 'no-photo', text: 'No photo available for this one' }));
+  media.append(photoEl(entry));
   entry.extra_files.forEach((f) => media.append(filePlaceholder(f), ' '));
   const cap = node.querySelector('.caption');
   if (entry.caption) cap.textContent = entry.caption; else cap.append(el('em', { text: '(no caption)' }));

@@ -82,6 +82,14 @@ check('changing a manual decision redraws the card in place', $$('.entry-card', 
 const star = $('.notable-toggle', manual); star.click(); await sleep(800);
 check('notable toggle updates in place', $$('.entry-card', manual).length === before && $('.notable-toggle', manual).textContent.includes('Notable'));
 
+// ---------------- A photo whose file can't be served explains itself ----------------
+const brokenImg = $('.photo-wrap img', manual);
+brokenImg.dispatchEvent(new window.Event('error'));
+check('a failing photo is replaced by an explanation, not a broken-image icon',
+  !$('.photo-wrap img', manual) || $$('.photo-wrap img', manual).length < $$('.entry-card', manual).length,
+  'img still present');
+check('the explanation says how to diagnose it', manual.textContent.includes('snipesbot diagnose'));
+
 // ---------------- Search ----------------
 const search = await tab('search', 1500);
 check('search lists everything by default', $$('.entry-card', search).length === 5, String($$('.entry-card', search).length));

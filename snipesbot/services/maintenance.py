@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 
 from ..env import Env
 from ..models import PENDING_KINDS
-from . import legacy, selftest, sync as sync_service
+from . import files, legacy, selftest, sync as sync_service
 from ..store import Busy
 
 Progress = Callable[[str], None]
@@ -65,13 +65,30 @@ def _selftest_clear(env: Env, params: dict, progress: Progress):
 
 
 def diagnose(env: Env, params: dict, progress: Progress) -> None:
-    """Quick connectivity / permissions / data check."""
-    cfg = env.cfg
+    """Where the data is, whether photos can be found, and whether Slack works.
+    The local checks come first: they need no network and no valid token."""
+    cfg, s = env.cfg, env.store
+    for line in files.describe_locations(env):
+        progress(line)
+    h = files.file_health(env)
+    progress(f"database       : {s.entries.count()} entries, {s.entries.count(sorted(PENDING_KINDS))} pending, "
+             f"{s.archive.count()} archived messages")
+    progress(f"photos         : {h.available} of {h.entries_with_files} found in the archive "
+             f"({h.files_on_disk} files on disk, {h.files_registered} registered)")
+    if h.missing:
+        progress(f"                 {h.missing_count} photo file(s) are missing. Examples:")
+        for entry, ref in h.missing[:3]:
+            progress(f"                   {ref.id} ({ref.name or 'unnamed'}) — entry {entry.message_ts}")
+        progress("                 Fix: python -m snipesbot relink-files <folder holding the old photos>, "
+                 "or open the photo in the webapp while Slack still has it (it re-downloads on first view).")
+    progress(f"app token      : {'configured' if cfg.app_token else 'not set (the bot cannot start; the webapp is fine)'}")
+    progress(f"webapp password: {'set' if cfg.webapp_password else 'NOT SET'}")
+
     try:
         auth = env.slack.auth_test()
-        progress(f"auth.test OK: bot {auth.get('user')} ({auth.get('user_id')}) in {auth.get('team')}")
+        progress(f"slack auth.test OK: bot {auth.get('user')} ({auth.get('user_id')}) in {auth.get('team')}")
     except Exception as exc:  # noqa: BLE001
-        progress(f"auth.test FAILED: {exc}")
+        progress(f"slack auth.test FAILED: {exc}")
         return
     checks = (
         ("channel readable", lambda: env.slack.conversations_history(channel=cfg.channel_id, limit=1)),
@@ -81,14 +98,9 @@ def diagnose(env: Env, params: dict, progress: Progress) -> None:
     for label, call in checks:
         try:
             call()
-            progress(f"{label}: OK")
+            progress(f"slack {label}: OK")
         except Exception as exc:  # noqa: BLE001
-            progress(f"{label}: FAILED ({exc})")
-    s = env.store
-    progress(f"database: {s.entries.count()} entries, {s.entries.count(sorted(PENDING_KINDS))} pending, "
-             f"{s.archive.count()} archived messages")
-    progress(f"app token configured: {'yes' if cfg.app_token else 'no (bot cannot start; webapp is fine)'}")
-    progress(f"webapp password: {'set' if cfg.webapp_password else 'NOT SET'}")
+            progress(f"slack {label}: FAILED ({exc})")
 
 
 TASKS: "OrderedDict[str, Task]" = OrderedDict((t.key, t) for t in (

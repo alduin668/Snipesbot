@@ -40,6 +40,36 @@ version used (`channels:history`, `reactions:read/write`, `files:read`,
 `message`, `reaction_added` **and `reaction_removed`** event subscriptions
 (the last is new: un-starring a photo now un-marks it as notable).
 
+## Where the data lives
+
+Everything is under one directory, `SNIPESBOT_DATA_DIR` (default `data`):
+
+```
+data/
+  snipesbot.db            entries, messages, settings, do-not-snipe, scoring
+  archive/files/          every photo/video, named by Slack file id (F0123ABC.jpg)
+```
+
+**The default `data` is relative to the directory you start the process from**,
+so the bot, the webapp and CLI commands must all be started from the same
+place (the systemd units set `WorkingDirectory`) or all given the same absolute
+`SNIPESBOT_DATA_DIR`. Two different working directories means two different,
+separate databases.
+
+If photos show as missing, run `python -m snipesbot diagnose`. It prints the
+absolute paths in use, how many photos the database can find, and examples of
+the ones it can't, and it works even without network access. To reconnect
+files that exist elsewhere on disk:
+
+```sh
+python -m snipesbot relink-files /path/to/old/data     # searches recursively
+```
+
+It matches files named by Slack file id (`F0123ABC.jpg`, the archive's naming)
+or by entry id (the old `photos/` folder's naming). A photo whose file is gone
+from your disk *and* older than Slack's retention window can't be recovered;
+anything Slack still has is re-downloaded the first time you open it.
+
 ## How a photo is judged
 
 Classification uses only the photo's own caption. Rules, in order:
