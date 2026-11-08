@@ -33,7 +33,7 @@ def media_files(message: dict) -> list:
 class ArchiveStore:
     def __init__(self, db: Database, files_dir: Path):
         self.db = db
-        self.files_dir = Path(files_dir)
+        self.files_dir = Path(files_dir).resolve()   # absolute: Flask resolves relative paths against its own package dir
 
     # ------------------------------------------------------------------ messages
     def save_messages(self, messages: Iterable[dict]) -> int:

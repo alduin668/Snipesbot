@@ -93,7 +93,7 @@ SCHEMA_VERSION = len(_MIGRATIONS)
 
 class Database:
     def __init__(self, path):
-        self.path = str(path)
+        self.path = str(path) if str(path) == ":memory:" else str(Path(path).resolve())
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()

@@ -50,7 +50,7 @@ data/
   archive/files/          every photo/video, named by Slack file id (F0123ABC.jpg)
 ```
 
-**The default `data` is relative to the directory you start the process from**,
+**The default `data` is relative to the directory you start the process from** (it is resolved to an absolute path at startup),
 so the bot, the webapp and CLI commands must all be started from the same
 place (the systemd units set `WorkingDirectory`) or all given the same absolute
 `SNIPESBOT_DATA_DIR`. Two different working directories means two different,

@@ -135,7 +135,7 @@ def serve_file(file_id):
     if not path:
         return jsonify({"error": "file is not available"}), 404
     info = env().store.archive.file_info(file_id) or {}
-    return send_file(path, mimetype=info.get("mimetype") or None, max_age=86400)
+    return send_file(str(path.resolve()), mimetype=info.get("mimetype") or None, max_age=86400)
 
 
 # ---- Special tab -------------------------------------------------------------

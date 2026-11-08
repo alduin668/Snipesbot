@@ -117,3 +117,39 @@ def test_the_cli_relinks_files(env, tmp_path, monkeypatch, capsys):
     assert cli.main(["relink-files", str(tmp_path)]) == 0
     assert env.store.archive.has_file(e.file.id)
     assert cli.main(["relink-files", str(tmp_path / "missing-dir")]) == 1
+
+
+# ---- regression: a RELATIVE data dir (the default!) must serve photos from any working directory -----
+
+@pytest.fixture
+def relative_env(tmp_path, monkeypatch):
+    """The production default: SNIPESBOT_DATA_DIR unset, so `data` is relative to wherever
+    the process was started. Every other test uses an absolute temp dir, which hid this."""
+    from pathlib import Path
+    from snipesbot.config import Config
+    from snipesbot.env import Env
+    from conftest import FakeSlack, ZEKE
+    monkeypatch.chdir(tmp_path)
+    e = Env.create(Config(bot_token="x", channel_id=CHANNEL, zeke_user_id=ZEKE, data_dir=Path("data")), slack=FakeSlack())
+    yield e
+    e.store.db.close()
+
+
+def test_photos_are_served_when_the_data_dir_is_relative(relative_env, tmp_path):
+    from snipesbot.web import create_app
+    entry = record(relative_env)
+    relative_env.store.archive.save_file(entry.file.id, "a.jpg", "image/jpeg", b"PHOTO")
+    r = create_app(relative_env).test_client().get(f"/api/files/{entry.file.id}")
+    assert r.status_code == 200 and r.data == b"PHOTO"
+    assert (tmp_path / "data" / "archive" / "files" / f"{entry.file.id}.jpg").exists()
+
+
+def test_all_stored_paths_are_absolute_whatever_the_config_says(relative_env):
+    assert relative_env.store.archive.files_dir.is_absolute()
+    assert relative_env.store.db.path.startswith("/")
+
+
+def test_load_config_makes_the_data_dir_absolute():
+    from snipesbot.config import load_config
+    cfg = load_config({"SLACK_BOT_TOKEN": "x", "SNIPES_CHANNEL_ID": "C1", "ZEKE_USER_ID": "U1"}, load_dotenv_file=False)
+    assert cfg.data_dir.is_absolute() and cfg.db_path.is_absolute() and cfg.archive_files_dir.is_absolute()
