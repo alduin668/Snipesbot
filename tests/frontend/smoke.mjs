@@ -4,7 +4,7 @@ const BASE = process.env.BASE_URL || 'http://127.0.0.1:8766';
 const page = await (await fetch(BASE + '/')).text();
 const dom = new JSDOM(page.replace(/<script[^>]*><\/script>/, ''), { url: BASE + '/', pretendToBeVisual: true });
 const { window } = dom;
-Object.assign(globalThis, { window, document: window.document, location: window.location, history: window.history });
+Object.assign(globalThis, { window, document: window.document, location: window.location, history: window.history, localStorage: window.localStorage, CustomEvent: window.CustomEvent });
 const alerts = [];
 globalThis.alert = (m) => alerts.push(String(m));
 globalThis.confirm = () => true;
@@ -34,12 +34,14 @@ await tab('livelog'); await tab('review'); await tab('manual', 1200); await tab(
 check('no <img src=x> injected from captions/context/file names', imgsX().length === 0, `${imgsX().length} found`);
 check('no <script> injected from display names', !$$('script').some((s) => s.textContent.includes('__pwned')));
 check('window.__pwned never set', window.__pwned === undefined);
+check('names are shown instead of ids (no "Name (U0123…)" anywhere)', !/\(U[A-Z0-9]{8,}\)/.test(document.body.textContent), (document.body.textContent.match(/.{20}\(U[A-Z0-9]{8,}\)/) || [''])[0]);
 check('hostile caption is shown as literal text', document.body.textContent.includes('<img src=x onerror=window.__pwned=1> hostile caption'));
 check('hostile display name is shown as literal text', document.body.textContent.includes('<script>window.__pwned=1</script>Bob'));
 
 // ---------------- Live Log ----------------
 const live = await tab('livelog');
-check('live log lists all 5 entries', $$('tbody tr', live).length === 5, String($$('tbody tr', live).length));
+check('live log lists all 6 entries', $$('tbody tr', live).length === 6, String($$('tbody tr', live).length));
+check('live log flags the incomplete snipe', $$('tbody tr.incomplete', live).length === 1);
 check('live log has the export link', !!$('a[href="/api/export.xlsx"]', live));
 $$('button', live).find((b) => b.textContent === 'Edit').click();
 await sleep(1200);
@@ -49,14 +51,17 @@ $('#modal-close').click();
 
 // ---------------- Review Queue: resolve with guessed chip ----------------
 let review = await tab('review', 1200);
-check('review queue shows the 3 pending photos', $$('.entry-card', review).length === 3, String($$('.entry-card', review).length));
+check('review queue shows the 4 photos needing a decision', $$('.entry-card', review).length === 4, String($$('.entry-card', review).length));
+const inc = $$('.entry-card', review).find((c) => c.querySelector('.badge.incomplete'));
+check('a snipe marked in Slack with nobody sniped shows up, labelled', !!inc && inc.textContent.includes('who was sniped?'));
+check('the review header explains what is in the queue', review.textContent.includes('snipes marked in Slack with nobody recorded'));
 const likely = $$('.entry-card', review).find((c) => c.querySelector('.badge.likely_snipe'));
 check('guessed mention is pre-filled as a chip', !!likely && likely.querySelectorAll('.chip').length === 1);
 $$('button', likely).find((b) => b.textContent === 'Snipe').click();
 await sleep(1200);
-check('resolving removes the card from the queue', $$('.entry-card', review).length === 2);
-const after = await api('/entries?pending=1');
-check('server agrees: two pending left', after.total === 2);
+check('resolving removes the card from the queue', $$('.entry-card', review).length === 3);
+const after = await api('/entries?review=1');
+check('server agrees: three left in the queue', after.total === 3);
 
 // snipe with nobody selected is blocked client-side
 const unid = $$('.entry-card', review).find((c) => c.querySelector('.badge.unidentified'));
@@ -65,15 +70,31 @@ $$('button', unid).find((b) => b.textContent === 'Snipe').click();
 await sleep(200);
 check('confirming a snipe with no sniped user is refused', alerts.some((a) => a.includes('at least one sniped user')));
 
+const incCard = $$('.entry-card', review).find((c) => c.querySelector('.badge.incomplete'));
+const chipIn = incCard.querySelector('.chip-search'); chipIn.value = 'Alice'; chipIn.dispatchEvent(new window.Event('input')); await sleep(60);
+incCard.querySelector('.chip-option').dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }));
+$$('button', incCard).find((b) => b.textContent === 'Snipe').click(); await sleep(1300);
+check('filling in who was sniped removes it from the queue', (await api('/entries?review=1')).total === 2 && !$('.badge.incomplete', review));
+
 // one-at-a-time paging
 const sel = $('select', review); sel.value = '1'; sel.dispatchEvent(new window.Event('change')); await sleep(800);
 check('"One at a time" shows a single card with an i / n counter', $$('.entry-card', review).length === 1 && /\d+ \/ \d+/.test(review.textContent));
+const fc = $('.entry-card', review);
+check('one-at-a-time uses the one-screen layout', fc.classList.contains('focus') && !!$('.focus-body > .focus-media', fc) && !!$('.focus-body > .focus-side', fc));
+check('photo, conversation, chips and buttons are all in that layout', !!$('.focus-media .photo-wrap, .focus-media .no-photo', fc)
+  && !!$('.focus-side > .focus-thread .caption-msg', fc) && !!$('.focus-side > .focus-controls .chip-input', fc) && $$('.focus-controls .state-buttons button', fc).length >= 7);
+check('the conversation loaded around the caption', $$('.focus-thread .ctx-msg', fc).length >= 2);
+check('the page-size choice is remembered', window.localStorage.getItem('snipesbot.pageSize.review') === '1');
+const counter = () => review.querySelector('.review-pager span').textContent;
+const before1 = counter();
+document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); await sleep(900);
+check('the right arrow key steps to the next photo', counter() !== before1, `${before1} -> ${counter()}`);
 
 // ---------------- Manual Decisions: edit in place ----------------
 let manual = await tab('manual', 1200);
 const before = $$('.entry-card', manual).length;
-check('manual decisions lists the resolved snipe and the special photo', before === 2, String(before));
-const snipeCard = $$('.entry-card', manual).find((c) => c.querySelector('.badge.snipe'));
+check('manual decisions lists the three hand-made decisions (special, fixed snipe, resolved likely)', before === 3, String(before));
+const snipeCard = $$('.entry-card', manual).find((c) => c.querySelector('.badge.snipe:not(.incomplete)'));
 $$('button', snipeCard).find((b) => b.textContent === 'NAS').click();
 await sleep(1200);
 check('changing a manual decision redraws the card in place', $$('.entry-card', manual).length === before && !!$('.badge.not_a_snipe', manual));
@@ -92,12 +113,12 @@ check('the explanation says how to diagnose it', manual.textContent.includes('sn
 
 // ---------------- Search ----------------
 const search = await tab('search', 1500);
-check('search lists everything by default', $$('.entry-card', search).length === 5, String($$('.entry-card', search).length));
+check('search lists everything by default', $$('.entry-card', search).length === 6, String($$('.entry-card', search).length));
 $('#s-q', search).value = 'hostile';
 $$('button', search).find((b) => b.textContent === 'Search').click(); await sleep(1200);
 check('caption search narrows results', $$('.entry-card', search).length === 1 && search.textContent.includes('1 match'));
 $$('button', search).find((b) => b.textContent === 'Clear filters').click(); await sleep(1200);
-check('clear filters restores results', $$('.entry-card', search).length === 5);
+check('clear filters restores results', $$('.entry-card', search).length === 6);
 check('sniper filter is populated from cached names', $$('#s-sniper option', search).length > 1);
 
 // ---------------- Special tab ----------------
@@ -117,7 +138,12 @@ const dns = await tab('dns', 900);
 const dIn = $('.chip-search', dns); dIn.value = 'Alice'; dIn.dispatchEvent(new window.Event('input')); await sleep(50);
 $('.chip-option', dns).dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true })); await sleep(900);
 check('adding to the do-not-snipe list works', (await api('/dns')).users.length === 1 && dns.textContent.includes('Alice'));
-$$('button', dns).find((b) => b.textContent === 'Remove').click(); await sleep(800);
+const logAfterDns = await tab('livelog', 900);
+check('a snipe of a do-not-snipe person is flagged "no points" in the Live Log', $$('tbody tr.no-points', logAfterDns).length === 2 && logAfterDns.textContent.includes('(no points)'));
+const analysisDns = await tab('analysis', 900);
+check('Analysis counts the no-points snipe', analysisDns.textContent.includes('No-points snipes') && analysisDns.textContent.includes('2 snipe(s) logged but not scored'));
+await tab('dns', 700);
+$$('button', $('#tab-dns')).find((b) => b.textContent === 'Remove').click(); await sleep(800);
 check('removing works', (await api('/dns')).users.length === 0);
 
 // ---------------- Matrix + Adjustments ----------------
@@ -136,10 +162,29 @@ check('analysis shows the leaderboard', an.textContent.includes('Leaderboard') &
 
 // ---------------- Maintenance ----------------
 const m = await tab('maintenance', 900);
-check('maintenance lists the consolidated tasks', $$('.card', m).length === 5, String($$('.card', m).length));
-const diag = $$('.card', m).find((c) => c.textContent.includes('Diagnose'));
-$('button', diag).click(); await sleep(2800);
-check('running a task streams its output', $('.console', m).textContent.includes('auth.test OK') && $('.console', m).textContent.includes('[finished]'));
+check('maintenance lists the tasks', $$('.card', m).length === 7, String($$('.card', m).length));
+const runBtn = (title) => $('button', $$('.card', m).find((c) => c.textContent.includes(title)));
+const banner = () => $('.run-banner', m);
+check('nothing is shown as running at first', banner().hidden);
+
+runBtn('Slow demo').click(); await sleep(400);
+check('starting a task shows a running banner with a spinner and a timer',
+  !banner().hidden && banner().classList.contains('running') && !!$('.spinner', banner()) && !!$('.run-timer', banner()) && banner().textContent.includes('Running: Slow demo'));
+check('every run button is disabled while it runs', $$('.card button.btn', m).every((b) => b.disabled));
+check('the active task says Running… and the others say Busy', runBtn('Slow demo').textContent === 'Running…' && runBtn('Diagnose').textContent === 'Busy');
+await sleep(400);
+check('the header shows an activity pill from any tab', !$('#activity').hidden && $('#activity').textContent.includes('Slow demo'));
+await tab('livelog', 300); await tab('maintenance', 700);
+check('the running state survives switching tabs', banner().classList.contains('running') && banner().textContent.includes('Slow demo'));
+await sleep(3200);
+check('when it ends the banner says finished and how long it took', banner().classList.contains('done') && /Finished: Slow demo/.test(banner().textContent) && /took \d+:\d\d/.test(banner().textContent));
+check('the buttons come back', $$('.card button.btn', m).every((b) => !b.disabled && b.textContent === 'Run'));
+await sleep(600);
+check('and the header pill goes away', $('#activity').hidden);
+check('the task output is shown', $('.console', m).textContent.includes('working… step 3'));
+
+runBtn('Diagnose').click(); await sleep(2200);
+check('a quick task still reports finished, with its output', banner().classList.contains('done') && $('.console', m).textContent.includes('auth.test OK'));
 
 check('no unexpected alert() dialogs', alerts.filter((a) => !a.includes('at least one sniped user')).length === 0, alerts.join(' | '));
 console.log(failures ? `\n${failures} FAILED` : '\nall frontend checks passed');

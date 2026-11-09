@@ -1,6 +1,7 @@
 """Small stores: settings, do-not-snipe, manual scoring inputs, names, job locks."""
 from __future__ import annotations
 
+import functools
 import json
 import os
 import socket
@@ -111,14 +112,35 @@ class ScoringStore:
             self.db.execute("DELETE FROM manual_matrix WHERE sniper = ? AND victim = ?", (sniper, victim))
 
 
+class Names(dict):
+    """user id -> display name, plus which names are shared by more than one person
+    (so they can be told apart instead of showing two identical labels)."""
+
+    @functools.cached_property
+    def ambiguous(self) -> frozenset:
+        seen: dict = {}
+        for name in self.values():
+            seen[name.lower()] = seen.get(name.lower(), 0) + 1
+        return frozenset(n for n, c in seen.items() if c > 1)
+
+
 class NameStore:
     """Slack user id -> display name cache."""
 
     def __init__(self, db: Database):
         self.db = db
 
-    def all(self) -> dict:
-        return {r["user_id"]: r["name"] for r in self.db.query("SELECT * FROM user_names")}
+    def all(self) -> Names:
+        return Names({r["user_id"]: r["name"] for r in self.db.query("SELECT * FROM user_names")})
+
+    def set_many(self, items: dict) -> None:
+        if not items:
+            return
+        with self.db.tx():
+            self.db.executemany(
+                "INSERT INTO user_names (user_id, name) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET name = excluded.name",
+                list(items.items()),
+            )
 
     def set(self, user_id: str, name: str) -> None:
         self.db.execute(
@@ -157,6 +179,14 @@ class LockStore:
 
     def release(self, name: str) -> None:
         self.db.execute("DELETE FROM locks WHERE name = ? AND owner = ?", (name, self.owner))
+
+    def holder(self, name: str) -> Optional[dict]:
+        """Who holds `name` right now (None if free or expired). `mine` is true when it's
+        this process, so a UI can tell its own job from the bot's scheduled pass."""
+        row = self.db.one("SELECT owner, expires_at FROM locks WHERE name = ?", (name,))
+        if row and row["expires_at"] > time.time():
+            return {"owner": row["owner"], "mine": row["owner"] == self.owner, "expires_at": row["expires_at"]}
+        return None
 
     @contextmanager
     def held(self, name: str, ttl: float = 3600):

@@ -82,6 +82,17 @@ class FakeSlack:
             raise SlackError("user_not_found")
         return {"user": {"profile": {"display_name": self.users[user]}}}
 
+    users_page_size = 200
+
+    def users_list(self, cursor=None, limit=200):
+        self._rec("users_list")
+        ids = sorted(self.users)
+        start = int(cursor or 0)
+        page = ids[start:start + self.users_page_size]
+        more = start + self.users_page_size < len(ids)
+        return {"members": [{"id": u, "name": u.lower(), "profile": {"display_name": self.users[u]}} for u in page],
+                "response_metadata": {"next_cursor": str(start + self.users_page_size) if more else ""}}
+
     def conversations_history(self, channel, oldest="0", cursor=None, limit=200, **kw):
         self._rec("conversations_history")
         msgs = [m for m in self.history if float(m["ts"]) >= float(oldest)]

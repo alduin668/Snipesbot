@@ -33,8 +33,8 @@ def check(env: Env, entry: Entry) -> int:
             if is_slack_user_id(entry.sniper):
                 env.slack.chat_postMessage(
                     channel=entry.sniper,
-                    text=(f"Hey — <@{target}> is on the do-not-snipe list. "
-                          f"Please delete your recent snipe of them in #snipes."),
+                    text=(f"Hey — <@{target}> is on the do-not-snipe list. Please delete your recent snipe "
+                          f"of them in #snipes. It's logged as a snipe but earns no points for either of you."),
                 )
             posted += 1
         except Exception as exc:  # noqa: BLE001

@@ -18,7 +18,7 @@ def _not_incorrect(entry: Entry) -> bool:
 
 def _set(kind: Kind):
     def apply(env: Env, entry: Entry) -> None:
-        svc.apply_state(env, entry.id, kind, sniped=None if kind is Kind.SNIPE else ())
+        svc.apply_state(env, entry.id, kind, sniped=None if kind is Kind.SNIPE else (), allow_incomplete=True)
     return apply
 
 

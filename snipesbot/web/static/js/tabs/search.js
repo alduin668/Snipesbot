@@ -43,13 +43,14 @@ export function mount(panel) {
 
   const list = createPagedList({
     emptyText: 'No matches.',
+    storageKey: 'search',
     header: [run, clear, count],
     fetchPage: async (page) => {
       const data = await api('/entries' + query({ ...params(), ...page }));
       count.textContent = `${data.total} match${data.total === 1 ? '' : 'es'}`;
       return data;
     },
-    renderItem: (entry, ctx) => createEntryCard(entry, { onChange: (u) => ctx.replace(u) }),
+    renderItem: (entry, ctx) => createEntryCard(entry, { layout: ctx.focus ? 'focus' : 'stack', onChange: (u) => ctx.replace(u) }),
   });
 
   run.addEventListener('click', () => list.reset());

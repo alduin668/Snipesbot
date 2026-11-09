@@ -9,7 +9,7 @@ from ...analysis.stats import day_name, time_bucket
 from ...models import PENDING_KINDS, Kind
 from ...services import archiver, context as context_service, entries as svc
 from ..deps import env
-from ..serializers import entry_view
+from ..serializers import ViewContext, entry_view
 
 bp = Blueprint("entries", __name__)
 
@@ -23,28 +23,31 @@ def _flag(name: str):
     return None if v in (None, "") else v in ("1", "true", "yes")
 
 
-def _view(e):
-    return entry_view(env(), e, env().store.names.all())
+def _view(entry):
+    return entry_view(ViewContext.build(env(), [entry]), entry)
 
 
 @bp.get("/entries")
 def list_entries():
     """One listing endpoint for the Review Queue, Manual Decisions and Search tabs.
 
-    Filters: pending, kind (csv), manual, notable, sniper, sniped, day, time, q.
+    Filters: review (pending + snipes with nobody sniped), pending, kind (csv), manual,
+    notable, sniper, sniped, day, time, q.
     Paging: limit (omit for all) and offset. Review is oldest-first by default.
     """
     e = env()
-    pending = _flag("pending")
+    pending, review = _flag("pending"), _flag("review")
     kinds = _csv("kind")
     try:
         kind_filter = {Kind(k) for k in kinds} if kinds else None
     except ValueError:
         return jsonify({"error": "unknown kind"}), 400
-    if pending:
+    if review:
+        kind_filter = (kind_filter or (PENDING_KINDS | {Kind.SNIPE})) & (PENDING_KINDS | {Kind.SNIPE})
+    elif pending:
         kind_filter = (kind_filter or set(PENDING_KINDS)) & PENDING_KINDS
 
-    order = request.args.get("order") or ("asc" if pending else "desc")
+    order = request.args.get("order") or ("asc" if (pending or review) else "desc")
     found = e.store.entries.find(
         kinds=kind_filter, manual=_flag("manual"), sniper=request.args.get("sniper") or None,
         text=(request.args.get("q") or "").strip() or None, newest_first=(order != "asc"),
@@ -55,7 +58,8 @@ def list_entries():
              if (not sniped or sniped in x.sniped)
              and (not day or day_name(x, tz) == day)
              and (not bucket or time_bucket(x.local_time(tz).hour) == bucket)
-             and (notable is None or x.notable == notable)]
+             and (notable is None or x.notable == notable)
+             and (not review or x.needs_review)]
 
     total = len(found)
     try:
@@ -64,8 +68,8 @@ def list_entries():
     except ValueError:
         return jsonify({"error": "limit/offset must be integers"}), 400
     page = found[offset: offset + limit] if limit else found[offset:]
-    names = e.store.names.all()
-    return jsonify({"entries": [entry_view(e, x, names) for x in page], "total": total})
+    ctx = ViewContext.build(e, page)
+    return jsonify({"entries": [entry_view(ctx, x) for x in page], "total": total})
 
 
 def _get_or_404(entry_id):
@@ -143,11 +147,13 @@ def serve_file(file_id):
 @bp.get("/special")
 def special_list():
     e = env()
-    names = e.store.names.all()
+    parents = e.store.entries.special_open()
+    children = {p.id: e.store.entries.derived(p.id) for p in parents}
+    ctx = ViewContext.build(e, parents + [c for cs in children.values() for c in cs])
     out = []
-    for parent in e.store.entries.special_open():
-        view = entry_view(e, parent, names)
-        view["derived_entries"] = [entry_view(e, c, names) for c in e.store.entries.derived(parent.id)]
+    for parent in parents:
+        view = entry_view(ctx, parent)
+        view["derived_entries"] = [entry_view(ctx, c) for c in children[parent.id]]
         out.append(view)
     return jsonify({"entries": out})
 

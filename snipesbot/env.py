@@ -21,6 +21,7 @@ class Env:
     store: Store
     slack: Any = None                      # slack_sdk.WebClient (or a test double)
     _bot_user_id: Optional[str] = field(default=None, repr=False)
+    _name_misses: dict = field(default_factory=dict, repr=False)   # user id -> when a lookup last failed
 
     @classmethod
     def create(cls, cfg: Config, slack: Any = None) -> "Env":

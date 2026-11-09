@@ -7,10 +7,12 @@ export function mount(panel) {
   const refreshBtn = el('button', { type: 'button', class: 'btn', text: 'Refresh queue' });
   const list = createPagedList({
     emptyText: 'Queue is empty 🎉',
-    header: [refreshBtn],
-    fetchPage: (page) => api('/entries' + query({ pending: 1, ...page })),
+    storageKey: 'review',
+    header: [refreshBtn, el('span', { class: 'review-mode-label',
+      text: 'Needs a decision: unidentified photos, likely snipes, and snipes marked in Slack with nobody recorded as sniped yet.' })],
+    fetchPage: (page) => api('/entries' + query({ review: 1, ...page })),
     // Resolving removes the card: reload this page so the next entry slides in.
-    renderItem: (entry, ctx) => createEntryCard(entry, { onChange: () => ctx.reload() }),
+    renderItem: (entry, ctx) => createEntryCard(entry, { layout: ctx.focus ? 'focus' : 'stack', onChange: () => ctx.reload() }),
   });
   refreshBtn.addEventListener('click', () => list.reload());
   panel.append(list.el);

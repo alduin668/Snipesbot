@@ -11,8 +11,9 @@ entries are matched by id, so nothing is duplicated.
 
 Behaviour changes made while importing:
   * legacy "ignored" entries become manual NAS (what recount used to do)
-  * snipes with an empty sniped list (the old "malformed snipes") are
-    demoted to unidentified, as scripts/fix_malformed_snipes.py did
+  * snipes with an empty sniped list (the old "malformed snipes": a photo marked
+    green by reaction, with no #snipe reply to say who) stay snipes, but show up in
+    the Review Queue as "who was sniped?" until someone fills it in
   * `status`, `ignored`, `context_*`, `photo_path` are dropped: context now
     comes from the archive, and photos are served from the archive
 """
@@ -38,7 +39,8 @@ class ImportReport:
     skipped: int = 0
     messages: int = 0
     files: int = 0
-    demoted_malformed: int = 0
+    incomplete_snipes: int = 0
+    dns_users: int = 0
     converted_ignored: int = 0
     missing_files: list = field(default_factory=list)    # paths the old index named but that weren't on disk
     missing_photos: int = 0                              # entries whose photo couldn't be located at all
@@ -47,7 +49,8 @@ class ImportReport:
     def summary(self) -> str:
         text = (f"{self.entries} entries imported ({self.skipped} already present), "
                 f"{self.messages} archived messages, {self.files} files, "
-                f"{self.converted_ignored} legacy-ignored -> NAS, {self.demoted_malformed} malformed snipes demoted")
+                f"{self.converted_ignored} legacy-ignored -> NAS, {self.incomplete_snipes} snipes need a sniped user, "
+                f"{self.dns_users} do-not-snipe")
         if self.missing_files or self.missing_photos:
             text += f"; {len(self.missing_files)} archived file(s) and {self.missing_photos} photo(s) NOT FOUND"
         return text
@@ -93,8 +96,14 @@ def import_legacy(env: Env, legacy_dir: Path, progress: Progress = print) -> Imp
         store.entries.insert(_convert_entry(env, legacy_dir, raw, report))
         report.entries += 1
 
-    for user in _load(legacy_dir / "do_not_snipe.json", []):
-        store.dns.add(user)
+    dns_file = legacy_dir / "do_not_snipe.json"
+    if dns_file.exists():
+        users = [u for u in _load(dns_file, []) if isinstance(u, str) and u]
+        for user in users:
+            store.dns.add(user)
+        report.dns_users = len(users)
+    else:
+        report.notes.append(f"do_not_snipe.json was not found in {legacy_dir}: the do-not-snipe list was NOT imported")
     for w in _load(legacy_dir / "dns_warnings.json", []):
         if store.dns.reserve_warning(w["channel"], w["snipe_ts"], w["target"], w.get("sniper", "")):
             store.dns.record_warning_message(w["channel"], w["snipe_ts"], w["target"],
@@ -115,6 +124,8 @@ def import_legacy(env: Env, legacy_dir: Path, progress: Progress = print) -> Imp
         store.tests.add(t["channel"], t["ts"], t.get("label", ""))
 
     progress(f"[migrate] {report.summary()}")
+    for note in report.notes:
+        progress(f"[migrate] WARNING: {note}")
     if report.missing_files or report.missing_photos:
         progress(_missing_hint(legacy_dir, report))
     return report
@@ -140,9 +151,8 @@ def _convert_entry(env: Env, legacy_dir: Path, raw: dict, report: ImportReport) 
         report.converted_ignored += 1
     elif kind in (Kind.NOT_A_SNIPE, Kind.INCORRECT_SNIPE):
         manual = True                            # these were always human decisions
-    if kind is Kind.SNIPE and not sniped:        # the old "malformed snipe"
-        kind, manual = Kind.UNIDENTIFIED, True
-        report.demoted_malformed += 1
+    if kind is Kind.SNIPE and not sniped:        # the old "malformed snipe": keep it, flag it
+        report.incomplete_snipes += 1
 
     file = _file_ref(raw.get("file"))
     extras = tuple(f for f in (_file_ref(x) for x in raw.get("extra_files") or []) if f)

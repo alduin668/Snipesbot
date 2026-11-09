@@ -8,12 +8,20 @@ const SIZES = [['10', '10'], ['25', '25'], ['50', '50'], ['100', '100'], ['all',
  * of entries only ever builds the cards on screen.
  *
  *   fetchPage({limit, offset}) -> {entries, total}
- *   renderItem(entry, {replace(updated), reload()}) -> Promise<Element>|Element
+ *   renderItem(entry, {replace(updated), reload(), focus}) -> Promise<Element>|Element
+ *                       `focus` is true in one-at-a-time mode, where each card gets the whole screen.
+ *   storageKey          remember the chosen page size in this browser, per tab
  */
-export function createPagedList({ emptyText, fetchPage, renderItem, header = [] }) {
+function remembered(key) {
+  try { return key ? localStorage.getItem(`snipesbot.pageSize.${key}`) : null; } catch { return null; }
+}
+
+export function createPagedList({ emptyText, fetchPage, renderItem, header = [], storageKey = '' }) {
   const state = { size: 25, index: 0, total: 0 };
+  const saved = remembered(storageKey);
+  const initial = SIZES.some(([v]) => v === saved) ? saved : '25';
   const sizeSelect = el('select');
-  SIZES.forEach(([v, label]) => sizeSelect.append(el('option', { value: v, text: label, ...(v === '25' ? { selected: '' } : {}) })));
+  SIZES.forEach(([v, label]) => sizeSelect.append(el('option', { value: v, text: label, ...(v === initial ? { selected: '' } : {}) })));
   const prev = el('button', { type: 'button', class: 'btn', text: '← Prev' });
   const next = el('button', { type: 'button', class: 'btn', text: 'Next →' });
   const info = el('span');
@@ -21,6 +29,7 @@ export function createPagedList({ emptyText, fetchPage, renderItem, header = [] 
   const controls = el('div', { class: 'review-controls' }, ...header,
     el('label', { class: 'review-mode-label' }, 'Show: ', sizeSelect), pager);
   const list = el('div', { class: 'entry-list' });
+  const isFocus = () => sizeSelect.value === '1';
   const root = el('div', {}, controls, list);
 
   const pageSize = () => (sizeSelect.value === 'all' ? Infinity : parseInt(sizeSelect.value, 10));
@@ -28,6 +37,7 @@ export function createPagedList({ emptyText, fetchPage, renderItem, header = [] 
 
   async function load() {
     state.size = pageSize();
+    list.classList.toggle('focus', isFocus());
     render(list, 'Loading…');
     let data;
     try {
@@ -60,11 +70,24 @@ export function createPagedList({ emptyText, fetchPage, renderItem, header = [] 
   function ctxFor(holder) {
     return {
       reload: load,
+      focus: isFocus(),
       replace: async (updated) => { const fresh = await renderItem(updated, ctxFor(holder)); holder.node.replaceWith(fresh); holder.node = fresh; },
     };
   }
 
-  sizeSelect.addEventListener('change', () => { state.index = 0; load(); });
+  sizeSelect.addEventListener('change', () => {
+    state.index = 0;
+    try { if (storageKey) localStorage.setItem(`snipesbot.pageSize.${storageKey}`, sizeSelect.value); } catch { /* private mode */ }
+    load();
+  });
+  // In one-at-a-time mode the arrow keys step through the queue (never while typing in a field).
+  document.addEventListener('keydown', (e) => {
+    const panel = root.closest('.tab-content');
+    if (!isFocus() || !root.isConnected || (panel && !panel.classList.contains('active'))) return;   // only the tab on screen
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '')) return;
+    if (e.key === 'ArrowLeft' && !prev.disabled) prev.click();
+    if (e.key === 'ArrowRight' && !next.disabled) next.click();
+  });
   prev.addEventListener('click', () => { state.index = Math.max(0, state.index - 1); load(); });
   next.addEventListener('click', () => { state.index = Math.min(lastIndex(), state.index + 1); load(); });
 

@@ -85,6 +85,28 @@ def test_reactions_on_untracked_or_deleted_messages_are_ignored(env):
     assert env.store.entries.get_by_message(CHANNEL, TS).kind is Kind.LIKELY_SNIPE
 
 
-def test_a_snipe_reaction_with_nobody_to_snipe_is_ignored_not_crashed(env):
+def test_a_snipe_reaction_with_nobody_to_snipe_becomes_an_incomplete_snipe_in_the_review_queue(env, slack):
+    """Marking a photo green in Slack has nowhere to say who was sniped. The old bot made a
+    'malformed snipe' that a script had to repair; now it stays a snipe and shows up for fixing."""
+    entry = record(env, "untagged")
+    e = react(env, "large_green_circle")
+    assert e.kind is Kind.SNIPE and e.sniped == () and e.manually_resolved
+    assert e.incomplete and e.needs_review
+    assert [x.id for x in env.store.entries.needs_review()] == [entry.id]
+    assert env.store.entries.count_needs_review() == 1
+    assert [n for n, u in slack.reactions[(CHANNEL, TS)] if u == BOT] == ["large_green_circle"]   # still green on Slack
+
+
+def test_fixing_an_incomplete_snipe_takes_it_out_of_the_queue(env):
+    entry = record(env, "untagged")
+    react(env, "large_green_circle")
+    fixed = svc.resolve_pending(env, entry.id, Kind.SNIPE, sniped=[ALICE])
+    assert fixed.sniped == (ALICE,) and not fixed.incomplete
+    assert env.store.entries.needs_review() == []
+
+
+def test_a_snipe_with_nobody_sniped_scores_nothing_until_fixed(env):
+    from snipesbot.analysis.stats import Stats
     record(env, "untagged")
-    assert react(env, "large_green_circle").kind is Kind.UNIDENTIFIED
+    react(env, "large_green_circle")
+    assert Stats(env).leaderboard() == [] and Stats(env).pending_count == 1

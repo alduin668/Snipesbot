@@ -54,11 +54,13 @@ def old_dir(tmp_path):
 def test_import_converts_entries_and_fixes_the_known_data_problems(env, old_dir):
     report = legacy.import_legacy(env, old_dir, progress=lambda _l: None)
     get = env.store.entries.get
-    assert report.entries == 7 and report.demoted_malformed == 1 and report.converted_ignored == 1
+    assert report.entries == 7 and report.incomplete_snipes == 1 and report.converted_ignored == 1
 
     assert get("id1").kind is Kind.SNIPE and get("id1").sniped == (ALICE,) and get("id1").reacted_kind is Kind.SNIPE
     assert get("id2").manually_resolved                                      # NAS was always a human call
-    assert (get("id3").kind, get("id3").manually_resolved) == (Kind.UNIDENTIFIED, True)
+    # a "malformed" snipe stays a snipe (so Slack still shows green) but is flagged for fixing
+    assert (get("id3").kind, get("id3").sniped, get("id3").incomplete) == (Kind.SNIPE, (), True)
+    assert [e.id for e in env.store.entries.needs_review()] == ["id3"]
     assert (get("id4").kind, get("id4").sniped, get("id4").manually_resolved) == (Kind.NOT_A_SNIPE, (), True)
     assert get("id5").notable and get("id5").notable_override is True       # a hand-set flag is kept
     assert get("id7").derived_from == "id6" and get("id7").sniper == "deer" and get("id7").reacted_kind is None

@@ -58,76 +58,71 @@ export function photoEl(entry) {
  * The card used by the Review Queue, Manual Decisions, Search, and the Live
  * Log edit modal. All state lives in this closure -- no global ids or caches.
  *
+ *   layout: 'stack'  chat order: earlier messages, photo, caption, later messages,
+ *                    then the controls. Used when many cards are listed.
+ *           'focus'  one screen: photo on the left; the conversation scrolls beside it;
+ *                    the chips and buttons stay pinned underneath. Used for one-at-a-time.
  *   onChange(updatedEntry)  after a state button succeeds
  *   onNotable(updatedEntry) after the notable toggle (optional)
  */
-export async function createEntryCard(entry, { onChange, onNotable } = {}) {
+export async function createEntryCard(entry, { onChange, onNotable, layout = 'stack' } = {}) {
   const users = await loadUsers();
-  const card = fromHtml(html`
-    <div class="card entry-card" data-id="${entry.id}">
-      <div class="entry-header">
-        <span>${entry.sniper}'s photo</span>
-        <span class="badge ${entry.kind}">${entry.kind_label}</span>
-        ${entry.manually_resolved ? html`<span class="badge manual">manual</span>` : ''}
-        ${entry.permalink ? html`<a href="${entry.permalink}" target="_blank" rel="noopener">open in Slack</a>` : ''}
-      </div>
-      <div class="entry-stack">
-        <div class="ctx-thread ctx-before"></div>
-        <button type="button" class="btn load-more" data-more="before">↑ Load earlier</button>
-        <div class="photo-slot"></div>
-        <div class="extra-files"></div>
-        <div class="ctx-msg caption-msg">📷 <strong class="who"></strong> <span class="caption"></span></div>
-        <div class="ctx-thread ctx-after"></div>
-        <button type="button" class="btn load-more" data-more="after">↓ Load later</button>
-        <div class="replies-slot"></div>
-      </div>
-      <div class="resolve-row">
-        <div class="chip-slot"></div>
-      </div>
-      <div class="review-controls state-buttons"></div>
+  const focus = layout === 'focus';
+
+  // ---- the parts (assembled differently below) ------------------------------------------------
+  const header = fromHtml(html`
+    <div class="entry-header">
+      <span class="entry-title"></span>
+      <span class="badge ${entry.kind}${entry.incomplete ? ' incomplete' : ''}">${entry.kind_label}</span>
+      ${entry.manually_resolved ? html`<span class="badge manual">manual</span>` : ''}
+      ${entry.no_points_ids.length ? html`<span class="badge nopoints" title="A snipe of someone on the do-not-snipe list is logged, but earns nobody points.">no points · ${entry.no_points_display.join(', ')} is do-not-snipe</span>` : ''}
+      ${entry.permalink ? html`<a href="${entry.permalink}" target="_blank" rel="noopener">open in Slack</a>` : ''}
     </div>`);
+  header.querySelector('.entry-title').textContent = `${entry.sniper}'s photo`;
 
-  card.querySelector('.who').textContent = `${entry.sniper}:`;
-  const cap = card.querySelector('.caption');
-  if (entry.caption) cap.textContent = entry.caption; else cap.append(el('em', { text: '(no caption)' }));
-  card.querySelector('.photo-slot').replaceWith(photoEl(entry));
-  const extras = card.querySelector('.extra-files');
+  const beforeEl = el('div', { class: 'ctx-thread ctx-before' });
+  const afterEl = el('div', { class: 'ctx-thread ctx-after' });
+  const earlier = el('button', { type: 'button', class: 'btn load-more', text: '↑ Load earlier' });
+  const later = el('button', { type: 'button', class: 'btn load-more', text: '↓ Load later' });
+  const repliesEl = el('div', { class: 'replies-slot' });
+  const photo = photoEl(entry);
+  const extras = el('div', { class: 'extra-files' });
   entry.extra_files.forEach((f) => extras.append(filePlaceholder(f), ' '));
-  if (!entry.extra_files.length) extras.remove();
+  const caption = fromHtml(html`<div class="ctx-msg caption-msg">📷 <strong class="who"></strong> <span class="caption"></span></div>`);
+  caption.querySelector('.who').textContent = `${entry.sniper}:`;
+  const cap = caption.querySelector('.caption');
+  if (entry.caption) cap.textContent = entry.caption; else cap.append(el('em', { text: '(no caption)' }));
 
-  // -- who was sniped
   const chips = createChipInput({
     users: () => users,
     initial: entry.guessed_ids.map((id, i) => ({ id, display: entry.guessed_display[i] })),
     placeholder: 'Sniped user(s) — type a name…',
   });
-  card.querySelector('.chip-slot').replaceWith(chips.el);
+  const chipRow = el('div', { class: 'resolve-row' }, chips.el);
+  const buttons = el('div', { class: 'review-controls state-buttons' });
 
-  // -- context + replies (fetched after render so the list itself stays light)
+  // ---- context + replies (fetched after render so the list itself stays light) -----------------------
   const counts = { before: CONTEXT_STEP, after: CONTEXT_STEP };
-  const beforeEl = card.querySelector('.ctx-before');
-  const afterEl = card.querySelector('.ctx-after');
+  const thread = focus ? el('div', { class: 'focus-thread' }) : null;
   async function loadContext() {
     try {
       const ctx = await api(`/entries/${entry.id}/context?before=${counts.before}&after=${counts.after}`);
       beforeEl.replaceChildren(...ctx.before.map((m) => messageEl(m)));
       afterEl.replaceChildren(...ctx.after.map((m) => messageEl(m)));
+      // In the one-screen layout, keep the photo's own caption in view as context loads around it.
+      if (thread) thread.scrollTop = Math.max(0, caption.offsetTop - thread.clientHeight / 3);
     } catch { /* context is best-effort */ }
   }
-  card.querySelectorAll('[data-more]').forEach((btn) => btn.addEventListener('click', () => {
-    counts[btn.dataset.more] += CONTEXT_STEP;
-    loadContext();
-  }));
-  loadContext();
+  earlier.addEventListener('click', () => { counts.before += CONTEXT_STEP; loadContext(); });
+  later.addEventListener('click', () => { counts.after += CONTEXT_STEP; loadContext(); });
   api(`/entries/${entry.id}/replies`).then(({ replies }) => {
     if (!replies.length) return;
-    card.querySelector('.replies-slot').replaceChildren(
-      el('div', { class: 'thread-label', text: 'Thread replies' }),
+    repliesEl.replaceChildren(el('div', { class: 'thread-label', text: 'Thread replies' }),
       ...replies.map((m) => messageEl(m, 'reply')));
   }).catch(() => {});
 
-  // -- actions
-  const buttons = card.querySelector('.state-buttons');
+  // ---- actions -----------------------------------------------------------------------------------------
+  const card = el('div', { class: `card entry-card${focus ? ' focus' : ''}`, 'data-id': entry.id });
   const setBusy = (busy) => card.querySelectorAll('button').forEach((b) => { b.disabled = busy; });
 
   for (const s of STATE_BUTTONS) {
@@ -168,5 +163,20 @@ export async function createEntryCard(entry, { onChange, onNotable } = {}) {
     star.disabled = false;
   });
   buttons.append(star);
+
+  // ---- assembly -------------------------------------------------------------------------------------------
+  if (focus) {
+    thread.append(beforeEl, earlier, caption, afterEl, later, repliesEl);
+    card.append(header,
+      el('div', { class: 'focus-body' },
+        el('div', { class: 'focus-media' }, photo, extras),
+        el('div', { class: 'focus-side' }, thread, el('div', { class: 'focus-controls' }, chipRow, buttons))));
+  } else {
+    card.append(header,
+      el('div', { class: 'entry-stack' }, beforeEl, earlier, photo, extras, caption, afterEl, later, repliesEl),
+      chipRow, buttons);
+    if (!entry.extra_files.length) extras.remove();
+  }
+  loadContext();
   return card;
 }

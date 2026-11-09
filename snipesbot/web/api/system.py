@@ -8,9 +8,17 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from ...services import exports, maintenance, sync as sync_service
 from ...store import Busy
 from ..deps import env
-from ..serializers import entry_view
+from ..serializers import ViewContext, entry_view
 
 bp = Blueprint("system", __name__)
+
+
+def _activity() -> dict:
+    """What's running: a task started from this webapp, and/or a sync somebody else
+    (the bot's scheduled pass, the CLI) is running right now."""
+    holder = env().store.locks.holder(sync_service.LOCK_NAME)
+    return {"running": current_app.config["RUNNER"].current(),
+            "external_sync": bool(holder and not holder["mine"])}
 
 
 @bp.get("/status")
@@ -18,7 +26,9 @@ def status():
     e = env()
     last = e.store.settings.get(sync_service.WATERMARK_KEY)
     return jsonify({
+        "activity": _activity(),
         "entries": e.store.entries.count(),
+        "needs_review": e.store.entries.count_needs_review(),
         "last_sync": datetime.fromtimestamp(last, e.cfg.tz).isoformat(timespec="seconds") if last else None,
     })
 
@@ -31,9 +41,9 @@ def log():
         limit = max(1, min(5000, int(request.args.get("limit", 1000))))
     except ValueError:
         limit = 1000
-    names = e.store.names.all()
     rows = e.store.entries.find(limit=limit)
-    return jsonify({"rows": [entry_view(e, x, names) for x in rows], "total": e.store.entries.count()})
+    ctx = ViewContext.build(e, rows)
+    return jsonify({"rows": [entry_view(ctx, x) for x in rows], "total": e.store.entries.count()})
 
 
 @bp.get("/export.xlsx")
@@ -43,6 +53,11 @@ def export_xlsx():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="snipes_log.xlsx"'},
     )
+
+
+@bp.get("/maintenance/status")
+def maintenance_status():
+    return jsonify(_activity())
 
 
 @bp.get("/maintenance/tasks")

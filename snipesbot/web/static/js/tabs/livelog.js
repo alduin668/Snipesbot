@@ -34,10 +34,13 @@ export function mount(panel) {
   }
 
   function row(e) {
-    const tr = el('tr', { class: e.notable && e.kind !== 'incorrect_snipe' ? 'notable' : ROW_CLASS[e.kind] || '' });
-    const cells = [e.date, e.time, e.sniper, e.sniped_display.join(', '), e.sniped_ids.length > 1 ? 'Yes' : 'No',
-      e.notable ? 'Yes' : 'No', e.kind_label];
-    cells.forEach((c) => tr.append(el('td', { text: c })));
+    const cls = [e.notable && e.kind !== 'incorrect_snipe' ? 'notable' : ROW_CLASS[e.kind] || '',
+      e.incomplete ? 'incomplete' : '', e.no_points_ids.length ? 'no-points' : ''].filter(Boolean).join(' ');
+    const tr = el('tr', { class: cls });
+    const sniped = e.sniped_display.map((n, i) => (e.no_points_ids.includes(e.sniped_ids[i]) ? `${n} (no points)` : n)).join(', ');
+    const cells = [[e.date], [e.time], [e.sniper, e.sniper_id], [sniped, e.sniped_ids.join(', ')],
+      [e.sniped_ids.length > 1 ? 'Yes' : 'No'], [e.notable ? 'Yes' : 'No'], [e.kind_label]];
+    cells.forEach(([text, title]) => tr.append(el('td', title ? { text, title } : { text })));
     const link = el('td');
     if (e.permalink) link.append(el('a', { href: e.permalink, target: '_blank', rel: 'noopener', text: 'open' }));
     const edit = el('td', {}, el('button', { type: 'button', class: 'btn', text: 'Edit', onclick: () => openEditor(e.id) }));

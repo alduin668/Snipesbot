@@ -22,7 +22,7 @@ def _reply(env: Env, channel: str, user: str, text: str, blocks=None) -> None:
 
 
 def reviewsnipes(env: Env, command: dict) -> None:
-    pending = env.store.entries.pending()
+    pending = env.store.entries.needs_review()
     channel, user = command["channel_id"], command["user_id"]
     if not pending:
         _reply(env, channel, user, "Nothing to review — the queue is empty! 🎉")

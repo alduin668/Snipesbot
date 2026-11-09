@@ -10,17 +10,22 @@ from ..deps import env
 bp = Blueprint("scoring", __name__)
 
 
+def _names_for(user_ids) -> dict:
+    people.ensure_names(env(), user_ids, limit=40)
+    return env().store.names.all()
+
+
 def _roster(stats: Stats) -> list:
     """Everyone with a name, in the matrices, or with an adjustment -- ordered by
     True row total then name, so all matrix views and the Adjustments tab line up."""
-    names = env().store.names.all()
     true = stats.true_matrix()
-    users = set(names) | set(stats.coded_matrix()["users"]) | set(true["users"]) | set(stats.adjustments)
+    users = set(env().store.names.all()) | set(stats.coded_matrix()["users"]) | set(true["users"]) | set(stats.adjustments)
+    names = _names_for(users)
     return sorted(users, key=lambda u: (-true["row_totals"].get(u, 0), (names.get(u) or u).lower()))
 
 
 def _matrix_json(stats, order, row_totals, col_totals, cells, editable):
-    names = env().store.names.all()
+    names = _names_for(order)
     return jsonify({
         "users": [{"id": u, "display": people.display(u, names)} for u in order],
         "row_totals": {u: row_totals.get(u, 0) for u in order},
@@ -104,11 +109,24 @@ def set_adjustment():
 @bp.get("/analysis")
 def analysis():
     stats = Stats(env())
+    people.ensure_names(env(), [s.sniper for s in stats.snipes] + [v for s in stats.snipes for v in s.sniped])
     names = env().store.names.all()
     named = lambda d: {people.display(k, names): v for k, v in d.items()}  # noqa: E731
     by_day, by_bucket = stats.peak_windows()
     as_sniper, as_victim = stats.group_snipe_frequency()
+    no_points = stats.no_points_snipes()
+    by_sniper: dict = {}
+    for s, _victims in no_points:
+        by_sniper[s.sniper] = by_sniper.get(s.sniper, 0) + 1
     return jsonify({
+        "no_points": {
+            "total": len(no_points),
+            "by_sniper": named(dict(sorted(by_sniper.items(), key=lambda kv: -kv[1]))),
+            "recent": [{"date": s.local_time(env().cfg.tz).strftime("%Y-%m-%d"),
+                        "sniper": people.display(s.sniper, names),
+                        "victims": [people.display(v, names) for v in victims]}
+                       for s, victims in no_points[:20]],
+        },
         "leaderboard": [dict(r, user=people.display(r["user"], names)) for r in stats.leaderboard()],
         "rivalries": [{"pair": [people.display(u, names) for u in pair], "count": n} for pair, n in stats.rivalries()],
         "streaks": named(stats.streaks()),

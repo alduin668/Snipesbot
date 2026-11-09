@@ -81,6 +81,7 @@ def test_import_is_quiet_when_every_file_was_found(env, tmp_path):
     (d / "photos").mkdir(parents=True)
     (d / "photos" / "id1.jpg").write_bytes(b"x")
     (d / "snipes.json").write_text(json.dumps([legacy_entry(1)]))
+    (d / "do_not_snipe.json").write_text("[]")
     lines = []
     legacy.import_legacy(env, d, progress=lines.append)
     assert "NOT FOUND" not in "\n".join(lines) and "WARNING" not in "\n".join(lines)
@@ -153,3 +154,24 @@ def test_load_config_makes_the_data_dir_absolute():
     from snipesbot.config import load_config
     cfg = load_config({"SLACK_BOT_TOKEN": "x", "SNIPES_CHANNEL_ID": "C1", "ZEKE_USER_ID": "U1"}, load_dotenv_file=False)
     assert cfg.data_dir.is_absolute() and cfg.db_path.is_absolute() and cfg.archive_files_dir.is_absolute()
+
+
+def test_import_says_loudly_when_the_do_not_snipe_list_was_not_there(env, tmp_path):
+    d = tmp_path / "old"
+    d.mkdir()
+    (d / "snipes.json").write_text(json.dumps([legacy_entry(1)]))
+    lines = []
+    report = legacy.import_legacy(env, d, progress=lines.append)
+    assert report.dns_users == 0 and any("do-not-snipe list was NOT imported" in n for n in report.notes)
+    assert any("WARNING" in line and "do_not_snipe.json" in line for line in lines)
+
+
+def test_import_counts_the_do_not_snipe_people_and_a_rerun_picks_up_a_late_file(env, tmp_path):
+    d = tmp_path / "old"
+    d.mkdir()
+    (d / "snipes.json").write_text(json.dumps([legacy_entry(1)]))
+    legacy.import_legacy(env, d, progress=lambda _l: None)                    # list missing the first time
+    assert env.store.dns.list() == []
+    (d / "do_not_snipe.json").write_text(json.dumps(["UALICE001", "UBOB00001"]))
+    report = legacy.import_legacy(env, d, progress=lambda _l: None)           # idempotent: just adds the list
+    assert report.dns_users == 2 and sorted(env.store.dns.list()) == ["UALICE001", "UBOB00001"]

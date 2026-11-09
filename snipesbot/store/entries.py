@@ -153,6 +153,25 @@ class EntryStore:
     def pending(self, *, oldest_first: bool = True) -> list:
         return self.find(kinds=[Kind.UNIDENTIFIED, Kind.LIKELY_SNIPE], newest_first=not oldest_first)
 
+    def needs_review(self, *, oldest_first: bool = True) -> list:
+        """Everything a person still has to look at: unidentified, likely, and snipes
+        with nobody recorded as sniped."""
+        order = "ASC" if oldest_first else "DESC"
+        rows = self.db.query(
+            f"""SELECT * FROM entries
+                WHERE deleted_at IS NULL AND (kind IN (?, ?) OR (kind = ? AND sniped = '[]'))
+                ORDER BY message_ts {order}, created_at""",
+            (Kind.UNIDENTIFIED.value, Kind.LIKELY_SNIPE.value, Kind.SNIPE.value),
+        )
+        return [_row_to_entry(r) for r in rows]
+
+    def count_needs_review(self) -> int:
+        return self.db.one(
+            """SELECT COUNT(*) FROM entries
+               WHERE deleted_at IS NULL AND (kind IN (?, ?) OR (kind = ? AND sniped = '[]'))""",
+            (Kind.UNIDENTIFIED.value, Kind.LIKELY_SNIPE.value, Kind.SNIPE.value),
+        )[0]
+
     def special_open(self) -> list:
         return self.find(kinds=[Kind.SPECIAL], newest_first=False)
 

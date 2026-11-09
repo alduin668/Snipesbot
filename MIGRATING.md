@@ -99,3 +99,19 @@ them, gives an identical leaderboard to the old code's own.
 * `recover_manuals` treats Zeke's 🫆 as *special* (its current meaning); the
   old script read it as a legacy not-a-snipe.
 * Free-text names (e.g. "deer") are never DM'd or checked against do-not-snipe.
+
+## Later changes
+
+* **"Malformed snipes" are a first-class state now** (what `fix_malformed_snipes`
+  patched). Marking a photo with a Slack reaction and no `#snipe` reply keeps it
+  a snipe with nobody sniped; it scores nothing and shows in the Review Queue as
+  *"Snipe — who was sniped?"* until you fill it in. The importer no longer
+  demotes these to *unidentified*. (Anything already imported that way is in the
+  queue as a manual *unidentified*.)
+* **A snipe of a do-not-snipe person still counts as a snipe but earns nobody
+  points** (neither sniper nor target), based on the list as it is now.
+* **Names replace ids everywhere** (no more `Name (U0123…)`); the member list is
+  cached on each sync. Needs `users:read`, which `diagnose` already checks.
+* `migrate` now says whether `do_not_snipe.json` was found. If the do-not-snipe
+  list came across empty, check `ls data/*.json`, then re-run
+  `python -m snipesbot migrate`: it is idempotent and just adds what was missed.

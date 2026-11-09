@@ -27,6 +27,12 @@ export function mount(panel) {
       <div class="stat-block"><h3>Rivalries</h3><table><tbody>
         ${d.rivalries.length ? d.rivalries.map((r) => html`<tr><td>${r.pair.join(' vs ')}</td><td>${r.count}</td></tr>`) : html`<tr><td colspan="2">—</td></tr>`}
       </tbody></table></div>
+      <div class="stat-block"><h3>No-points snipes (target is on the do-not-snipe list)</h3>
+        <p class="caption">${d.no_points.total} snipe(s) logged but not scored — neither the sniper nor the target earns points.</p>
+        <table><tbody>${d.no_points.recent.length
+          ? d.no_points.recent.map((r) => html`<tr><td>${r.date}</td><td>${r.sniper}</td><td>→ ${r.victims.join(', ')}</td></tr>`)
+          : html`<tr><td colspan="3">None</td></tr>`}</tbody></table></div>
+      ${dictTable('No-points snipes by sniper', d.no_points.by_sniper)}
       ${dictTable('Sniping streaks (days)', d.streaks)}
       ${dictTable('Untouchable (days since last sniped)', d.untouchable)}
       ${dictTable('Retaliation speed (avg hrs)', d.retaliation_speed)}
@@ -35,7 +41,7 @@ export function mount(panel) {
       ${dictTable('Notable ratio', d.notable_ratio)}
       ${dictTable('Group snipes — as sniper', d.group_snipe_as_sniper)}
       ${dictTable('Group snipes — as victim', d.group_snipe_as_victim)}
-      <div class="stat-block"><h3>Review queue size</h3>${d.queue_size}</div>`);
+      <div class="stat-block"><h3>Review queue size (needs a decision)</h3>${d.queue_size}</div>`);
   }
   run.addEventListener('click', load);
   return { activate: load };

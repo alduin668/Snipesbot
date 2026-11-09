@@ -135,7 +135,7 @@ def test_context_endpoint_widens_on_request_and_replies(env, client):
     assert [m["text"] for m in ctx["before"]] == ["before2", "before1"] and len(ctx["after"]) == 2
     wide = client.get(f"/api/entries/{base.id}/context?before=4&after=3").get_json()
     assert len(wide["before"]) == 4 and len(wide["after"]) == 3
-    assert wide["before"][0]["user"].startswith("Alice")
+    assert wide["before"][0]["user"] == "Alice"
     replies = client.get(f"/api/entries/{base.id}/replies").get_json()["replies"]
     assert [r["text"] for r in replies] == ["a reply"]
 
@@ -177,7 +177,7 @@ def test_special_tab_flow(env, client):
 def test_users_and_dns(env, client):
     env.store.names.set(ALICE, "Alice")
     users = client.get("/api/users").get_json()["users"]
-    assert users == [{"id": ALICE, "name": "Alice", "display": f"Alice ({ALICE})"}]
+    assert users == [{"id": ALICE, "name": "Alice", "display": "Alice"}]
     client.post("/api/dns", json={"user_id": BOB}, headers=H)
     assert [u["id"] for u in client.get("/api/dns").get_json()["users"]] == [BOB]
     assert client.post("/api/dns", json={}, headers=H).status_code == 400
@@ -224,8 +224,8 @@ def test_log_status_and_xlsx_export(env, client):
     assert r.mimetype.endswith("spreadsheetml.sheet")
     ws = load_workbook(io.BytesIO(r.data)).active
     rows = list(ws.iter_rows(values_only=True))
-    assert rows[0][:4] == ("Date", "Time", "Sniper", "Sniped") and len(rows) == 3
-    assert any(r[6] == "snipe" and r[7].startswith("https://team.slack.com/archives/") for r in rows[1:])
+    assert rows[0][:4] == ("Date", "Time", "Sniper", "Sniped") and rows[0][7] == "Scores" and len(rows) == 3
+    assert any(r[6] == "snipe" and r[7] == "Yes" and r[8].startswith("https://team.slack.com/archives/") for r in rows[1:])
 
 
 def wait_done(client, run_id, timeout=5):
@@ -240,7 +240,7 @@ def wait_done(client, run_id, timeout=5):
 
 def test_maintenance_registry_and_running_a_task(env, client, slack):
     tasks = client.get("/api/maintenance/tasks").get_json()
-    assert set(tasks) == {"sync", "recover_manuals", "diagnose", "selftest", "selftest_clear"}
+    assert set(tasks) == {"sync", "refresh_names", "recover_manuals", "diagnose", "selftest", "selftest_clear"}
     assert tasks["selftest"]["dangerous"] and [p["name"] for p in tasks["sync"]["params"]] == ["since", "full", "repair_reactions"]
     run = client.post("/api/maintenance/diagnose/run", json={}, headers=H).get_json()["run_id"]
     done = wait_done(client, run)
@@ -269,3 +269,38 @@ def test_only_one_task_runs_at_a_time(env, client, slack, monkeypatch):
     assert client.post("/api/maintenance/diagnose/run", json={}, headers=H).status_code == 409
     gate.set()
     wait_done(client, first.get_json()["run_id"])
+
+
+# ---- activity: the UI can always tell what is running -----------------------------------------------------------
+
+def test_status_reports_a_running_task_with_elapsed_time_and_then_clears(env, client, slack):
+    import threading
+    from snipesbot.services import maintenance
+    gate = threading.Event()
+    slow = maintenance.Task("slow", "Slow thing", "x", lambda e, p, progress: (progress("step one"), gate.wait(3)))
+    client.application.config["RUNNER"].tasks = {**maintenance.TASKS, "slow": slow}
+    assert client.get("/api/status").get_json()["activity"] == {"running": None, "external_sync": False}
+    run_id = client.post("/api/maintenance/slow/run", json={}, headers=H).get_json()["run_id"]
+    time.sleep(0.2)
+    for url in ("/api/status", "/api/maintenance/status"):
+        act = client.get(url).get_json()
+        act = act.get("activity", act)
+        running = act["running"]
+        assert running["label"] == "Slow thing" and running["id"] == run_id and not running["done"]
+        assert running["elapsed"] >= 0.1 and running["last_line"] == "step one"
+    gate.set()
+    done = wait_done(client, run_id)
+    assert done["done"] and done["ok"] and done["label"] == "Slow thing" and done["elapsed"] > 0
+    assert client.get("/api/status").get_json()["activity"]["running"] is None
+
+
+def test_a_sync_running_in_another_process_is_visible_but_not_ours(env, client, cfg):
+    from snipesbot.store import Store
+    other = Store.open(cfg)                                            # e.g. the bot's scheduled pass
+    other.locks.acquire("sync", 60)
+    act = client.get("/api/maintenance/status").get_json()
+    assert act == {"running": None, "external_sync": True}
+    other.locks.release("sync")
+    assert client.get("/api/maintenance/status").get_json()["external_sync"] is False
+    env.store.locks.acquire("sync", 60)                                # our own lock is not "external"
+    assert client.get("/api/maintenance/status").get_json()["external_sync"] is False

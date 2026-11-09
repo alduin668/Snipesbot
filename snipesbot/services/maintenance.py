@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 
 from ..env import Env
 from ..models import PENDING_KINDS
-from . import files, legacy, selftest, sync as sync_service
+from . import files, legacy, people, selftest, sync as sync_service
 from ..store import Busy
 
 Progress = Callable[[str], None]
@@ -52,6 +52,11 @@ def _run_sync(env: Env, params: dict, progress: Progress):
     )
 
 
+def _refresh_names(env: Env, params: dict, progress: Progress):
+    n = people.refresh_directory(env, force=True)
+    progress(f"Cached {n} member names." if n else "Couldn't read the member list (the bot needs the users:read scope).")
+
+
 def _recover(env: Env, params: dict, progress: Progress):
     return legacy.recover_manual_decisions(env, progress)
 
@@ -73,6 +78,10 @@ def diagnose(env: Env, params: dict, progress: Progress) -> None:
     h = files.file_health(env)
     progress(f"database       : {s.entries.count()} entries, {s.entries.count(sorted(PENDING_KINDS))} pending, "
              f"{s.archive.count()} archived messages")
+    progress(f"review queue   : {s.entries.count_needs_review()} need a decision "
+             f"({sum(1 for e in s.entries.all_active() if e.incomplete)} are snipes with nobody sniped yet)")
+    progress(f"do-not-snipe   : {len(s.dns.list())} people on the list")
+    progress(f"names cached   : {len(s.names.all())}")
     progress(f"photos         : {h.available} of {h.entries_with_files} found in the archive "
              f"({h.files_on_disk} files on disk, {h.files_registered} registered)")
     if h.missing:
@@ -112,6 +121,9 @@ TASKS: "OrderedDict[str, Task]" = OrderedDict((t.key, t) for t in (
                  Param("full", "Rescan the whole season", "bool"),
                  Param("repair_reactions", "Verify every reaction on Slack", "bool",
                        "One Slack call per photo; slow on a big season."))),
+    Task("refresh_names", "Refresh names",
+         "Reads the workspace member list so every @mention and id shows as a real name. "
+         "Also runs automatically with each sync (at most once a day).", _refresh_names),
     Task("recover_manuals", "Recover manual decisions from reactions",
          "One-time: treats Zeke's own classification reactions on undecided photos as manual decisions. "
          "Only needed after migrating from the old JSON files.",
@@ -146,8 +158,8 @@ class JobRunner:
             if any(not r["done"] for r in self._runs.values()):
                 raise Busy("another task is still running")
             run_id = uuid.uuid4().hex
-            run = {"id": run_id, "task": key, "started": time.time(), "lines": deque(maxlen=self.MAX_LINES),
-                   "done": False, "ok": None, "error": None}
+            run = {"id": run_id, "task": key, "label": task.label, "started": time.time(), "finished": None,
+                   "lines": deque(maxlen=self.MAX_LINES), "done": False, "ok": None, "error": None}
             self._runs[run_id] = run
             while len(self._runs) > self.MAX_RUNS:
                 self._runs.popitem(last=False)
@@ -167,11 +179,26 @@ class JobRunner:
             run["lines"].append(f"FAILED: {run['error']}")
         finally:
             self.env.store.db.close()   # this thread's connection
+            run["finished"] = time.time()
             run["done"] = True
+
+    @staticmethod
+    def _summary(run: dict) -> dict:
+        end = run["finished"] or time.time()
+        last = run["lines"][-1] if run["lines"] else ""
+        return {"id": run["id"], "task": run["task"], "label": run["label"], "done": run["done"], "ok": run["ok"],
+                "error": run["error"], "elapsed": round(end - run["started"], 1), "line_count": len(run["lines"]),
+                "last_line": last}
+
+    def current(self) -> Optional[dict]:
+        """The run in progress, if any (what the UI shows as 'running')."""
+        for run in self._runs.values():
+            if not run["done"]:
+                return self._summary(run)
+        return None
 
     def get(self, run_id: str) -> Optional[dict]:
         run = self._runs.get(run_id)
         if run is None:
             return None
-        return {"id": run["id"], "task": run["task"], "output": "\n".join(run["lines"]),
-                "done": run["done"], "ok": run["ok"], "error": run["error"]}
+        return {**self._summary(run), "output": "\n".join(run["lines"])}

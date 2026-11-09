@@ -124,6 +124,17 @@ class Entry:
         return self.kind in PENDING_KINDS
 
     @property
+    def incomplete(self) -> bool:
+        """Marked a snipe (e.g. by a reaction) but nobody is recorded as sniped yet.
+        It keeps its kind and Slack reaction, scores nothing, and sits in the review
+        queue until someone says who was sniped."""
+        return self.kind is Kind.SNIPE and not self.sniped
+
+    @property
+    def needs_review(self) -> bool:
+        return self.pending or self.incomplete
+
+    @property
     def deleted(self) -> bool:
         return self.deleted_at is not None
 

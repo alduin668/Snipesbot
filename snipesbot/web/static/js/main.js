@@ -29,10 +29,32 @@ async function show(name) {
   }
 }
 
+const clock = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+
+let pillTicker = null;
+
+/** The pill in the header: visible from every tab whenever something is running.
+ *  It ticks once a second on its own between server updates. */
+function showActivity(activity) {
+  const pill = $('#activity');
+  const running = activity?.running;
+  clearInterval(pillTicker);
+  if (!running && !activity?.external_sync) { pill.hidden = true; return; }
+  pill.hidden = false;
+  const text = pill.querySelector('.activity-text');
+  if (!running) { text.textContent = 'Sync running (bot)'; return; }
+  const started = Date.now() - running.elapsed * 1000;
+  const paint = () => { text.textContent = `${running.label} running · ${clock((Date.now() - started) / 1000)}`; };
+  paint();
+  pillTicker = setInterval(paint, 1000);
+}
+
 async function refreshMeta() {
   try {
     const s = await api('/status');
-    $('#meta').textContent = `${s.entries} entries • last sync ${s.last_sync ? new Date(s.last_sync).toLocaleString() : 'never'}`;
+    const review = s.needs_review ? ` • ${s.needs_review} to review` : '';
+    $('#meta').textContent = `${s.entries} entries${review} • last sync ${s.last_sync ? new Date(s.last_sync).toLocaleString() : 'never'}`;
+    showActivity(s.activity);
   } catch {
     $('#meta').textContent = '⚠️ couldn’t reach the server, retrying…';
   }
@@ -42,4 +64,6 @@ initModal();
 $$('.tab-btn').forEach((b) => b.addEventListener('click', () => show(b.dataset.tab)));
 show(location.hash.slice(1) in TABS ? location.hash.slice(1) : 'livelog');
 refreshMeta();
-setInterval(() => { if (!document.hidden) refreshMeta(); }, 15000);
+setInterval(() => { if (!document.hidden) refreshMeta(); }, 5000);
+window.addEventListener('snipesbot:activity', refreshMeta);          // a task just started or finished
+$('#activity').addEventListener('click', () => show('maintenance'));

@@ -1,7 +1,11 @@
 """
 Leaderboard and statistics.
 
-Only confirmed SNIPE entries are events. Scoring is layered:
+Only confirmed SNIPE entries are events. A snipe of someone on the do-not-snipe
+list still counts as a snipe (streaks, activity, the Live Log) but earns neither
+the sniper nor the target anything: that (sniper, victim) pair is left out of every
+matrix and the leaderboard. In a group snipe the other victims still score.
+Scoring is layered:
 
   1. coded matrix   what the bot/humans classified (from entries)
   2. manual matrix  hand corrections per sniper->victim cell (can be negative)
@@ -38,7 +42,10 @@ class Stats:
         self.now = now or datetime.now(self.tz)
         active = env.store.entries.all_active()
         self.snipes = [e for e in active if e.kind is Kind.SNIPE]
-        self.pending_count = sum(1 for e in active if e.pending)
+        self.pending_count = sum(1 for e in active if e.needs_review)
+        self.dns = frozenset(env.store.dns.list())
+        # (snipe, the victims that actually score): do-not-snipe victims are dropped
+        self.scored = [(s, tuple(v for v in s.sniped if v not in self.dns)) for s in self.snipes]
         self.manual = env.store.scoring.matrix()
         self.adjustments = env.store.scoring.adjustments()
 
@@ -46,9 +53,10 @@ class Stats:
     def coded_matrix(self) -> dict:
         cells = defaultdict(lambda: defaultdict(int))
         users = set()
-        for s in self.snipes:
-            users.add(s.sniper)
-            for victim in s.sniped:
+        for s, victims in self.scored:
+            if victims:
+                users.add(s.sniper)
+            for victim in victims:
                 cells[s.sniper][victim] += 1
                 users.add(victim)
         return self._matrix(users, {s: dict(v) for s, v in cells.items()})
@@ -106,8 +114,8 @@ class Stats:
     # -- other stats -----------------------------------------------------------
     def rivalries(self, top_n: int = 5) -> list:
         pairs: dict = defaultdict(int)
-        for s in self.snipes:
-            for target in s.sniped:
+        for s, victims in self.scored:
+            for target in victims:
                 pairs[tuple(sorted((s.sniper, target)))] += 1
         return sorted(pairs.items(), key=lambda kv: -kv[1])[:top_n]
 
@@ -127,22 +135,22 @@ class Stats:
 
     def untouchable(self) -> dict:
         last: dict = {}
-        for s in self.snipes:
-            for target in s.sniped:
+        for s, victims in self.scored:
+            for target in victims:
                 last[target] = max(last.get(target, s.posted_at), s.posted_at)
         now = self.now.timestamp()
         return dict(sorted(((u, int((now - t) // 86400)) for u, t in last.items()), key=lambda kv: -kv[1]))
 
     def retaliation_speed(self, window_hours: float = 48) -> dict:
-        events = sorted(self.snipes, key=lambda s: s.posted_at)
+        events = sorted(self.scored, key=lambda sv: sv[0].posted_at)
         deltas: dict = defaultdict(list)
-        for i, s in enumerate(events):
-            for victim in s.sniped:
-                for later in events[i + 1:]:
+        for i, (s, victims) in enumerate(events):
+            for victim in victims:
+                for later, later_victims in events[i + 1:]:
                     hours = (later.posted_at - s.posted_at) / 3600
                     if hours > window_hours:
                         break
-                    if later.sniper == victim and s.sniper in later.sniped:
+                    if later.sniper == victim and s.sniper in later_victims:
                         deltas[victim].append(hours)
                         break
         return {u: sum(h) / len(h) for u, h in deltas.items() if h}
@@ -154,6 +162,11 @@ class Stats:
             by_day[DAYS[t.weekday()]] += 1
             by_bucket[time_bucket(t.hour)] += 1
         return dict(by_day), dict(by_bucket)
+
+    def no_points_snipes(self) -> list:
+        """Snipes that hit someone on the do-not-snipe list: [(snipe, those victims)], newest first."""
+        hits = [(s, tuple(v for v in s.sniped if v in self.dns)) for s in self.snipes]
+        return sorted(((s, v) for s, v in hits if v), key=lambda sv: -sv[0].posted_at)
 
     def notable_ratio(self, minimum: int = 3) -> dict:
         total, notable = defaultdict(int), defaultdict(int)

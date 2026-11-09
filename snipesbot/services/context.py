@@ -17,7 +17,8 @@ def shape_message(raw: dict, names: dict) -> dict:
     return {
         "user": people.display(raw.get("user"), names),
         "user_id": raw.get("user"),
-        "text": people.render_mentions(raw.get("text"), names),
+        "text": people.render_text(raw.get("text"), names),
+        "raw": raw.get("text") or "",             # Slack's own text, for Slack's own cards
         "ts": raw.get("ts"),
         "files": [
             {"id": f.get("id"), "name": f.get("name") or "",
@@ -28,9 +29,12 @@ def shape_message(raw: dict, names: dict) -> dict:
 
 
 def _names_for(env: Env, raws: list) -> dict:
+    """Names for everyone who wrote, or is mentioned in, these messages."""
+    ids = []
     for raw in raws:
-        if raw.get("user"):
-            people.ensure_name(env, raw["user"])
+        ids.append(raw.get("user"))
+        ids.extend(people.ids_in(raw.get("text")))
+    people.ensure_names(env, [i for i in ids if i])
     return env.store.names.all()
 
 

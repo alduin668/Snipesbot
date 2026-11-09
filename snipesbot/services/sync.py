@@ -24,7 +24,7 @@ from typing import Callable, Optional
 from ..env import Env
 from ..models import Kind
 from ..slack_io import sync_reaction
-from . import archiver, entries as entry_service
+from . import archiver, entries as entry_service, people
 
 log = logging.getLogger("snipesbot")
 
@@ -42,6 +42,7 @@ class SyncStats:
     reclassified: int = 0
     reactions_repaired: int = 0
     deleted: int = 0
+    names: int = 0
     notes: list = field(default_factory=list)
 
     def summary(self) -> str:
@@ -67,6 +68,10 @@ def run_sync(env: Env, *, since: Optional[float] = None, full: bool = False,
     stats = SyncStats()
     with env.store.locks.held(LOCK_NAME, ttl=2 * 3600):
         progress(f"[sync] scanning #snipes since {datetime.fromtimestamp(since, env.cfg.tz).isoformat(timespec='seconds')}")
+
+        stats.names = people.refresh_directory(env)       # no-op if refreshed within 24h
+        if stats.names:
+            progress(f"[sync] cached {stats.names} member names")
 
         res = archiver.sync_from_slack(env, since, progress)
         stats.archived, stats.replies = res["archived"], res["replies"]

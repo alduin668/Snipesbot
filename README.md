@@ -104,6 +104,44 @@ the webapp) is locked: edits and sync never change it. Zeke's reactions:
 Live Log · Review Queue · Manual Decisions · Special · Search · Do Not Snipe ·
 Analysis · Matrix · Adjustments · Maintenance.
 
+**Review Queue** holds everything that needs a decision: unidentified photos,
+likely snipes, and **snipes with nobody recorded as sniped**. That last group is
+what you get when you mark a photo green with a Slack reaction (there's nowhere
+to say who). It stays a snipe, keeps its green reaction, scores nothing, and
+waits here, labelled *"Snipe — who was sniped?"*, until you pick the people.
+In Slack, `/reviewsnipes` includes them too.
+
+**One at a time** (the *Show* menu; your choice is remembered per tab) puts the
+photo, the conversation and the buttons on one screen, with no scrolling, and
+the ← → keys step through the queue:
+
+![one at a time](docs/one-at-a-time.png)
+
+**Names, not ids.** Every id is shown as a name: in captions, context, replies,
+cards, the Live Log, analysis, exports and CLI output. Slack's own formatting is
+decoded too (`<@U1>` → `@Name`, `<#C1|general>` → `#general`, `<!here>`,
+links, `&amp;`). A sync caches the whole workspace member list (once a day, or
+run **Refresh names** in Maintenance; it needs the `users:read` scope). Two people
+with the same name get a short id suffix so they can be told apart; hover a
+name in the Live Log for the id.
+
+**Running tasks are obvious.** Starting a Maintenance task shows a banner with a
+spinner, a ticking timer, the latest output line and a progress bar; every other
+button reads *Busy*; and a pill in the header shows it from any tab. It survives
+switching tabs and reloading. A sync started elsewhere (the bot's scheduled
+pass, the CLI) shows up the same way.
+
+![maintenance](docs/maintenance-running.png)
+
+**Do-not-snipe.** A snipe that tags someone on the list is still logged as a
+snipe (streaks, the Live Log, activity stats), but it earns **neither the sniper
+nor the target any points**: that sniper→target pair is left out of every matrix
+and the leaderboard. In a group snipe the other victims still score. It's marked
+*no points* in the UI, listed under Analysis → *No-points snipes*, and the
+export has a *Scores* column. This follows the list as it is **now**: adding
+someone applies to all their snipes, removing them makes those score again.
+The bot still posts its public warning and DMs the sniper (who is told it won't score).
+
 Scoring is layered: the **Coded** matrix (what was classified) plus a
 **Manual** matrix (hand corrections, can be negative) gives the **True**
 matrix, from which Snipes/Sniped come. Score = Snipes − Sniped + a per-person

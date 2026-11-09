@@ -8,7 +8,7 @@ from .. import classifier
 
 
 def _msg_block(m: dict) -> dict:
-    text = m["text"] or "_(no text)_"
+    text = m["raw"] or "_(no text)_"
     return {"type": "section", "text": {"type": "mrkdwn", "text": f"<@{m['user_id']}>: {text}"}}
 
 
@@ -30,7 +30,12 @@ def build_blocks(env: Env, entry: Entry) -> list:
         "text": f"📷 <@{entry.sniper}>" + (f": {caption}" if caption else " _(no caption)_")}]})
     blocks += [_msg_block(m) for m in ctx["after"] if m["user_id"]]
 
-    label = "Likely snipe (bare mention, unconfirmed)" if entry.kind is Kind.LIKELY_SNIPE else "Unidentified"
+    if entry.incomplete:
+        label = "Marked as a snipe, but nobody is recorded as sniped yet"
+    elif entry.kind is Kind.LIKELY_SNIPE:
+        label = "Likely snipe (bare mention, unconfirmed)"
+    else:
+        label = "Unidentified"
     heading = f"*Identify this photo* -- _{label}_"
     if link:
         heading += f"\n<{link}|View in #snipes>"
@@ -43,7 +48,7 @@ def build_blocks(env: Env, entry: Entry) -> list:
         return b
 
     blocks.append({"type": "actions", "block_id": f"review_{entry.id}", "elements": [
-        button("review_mark_snipe", "It's a snipe", "primary"),
+        button("review_mark_snipe", "Who got sniped?" if entry.incomplete else "It's a snipe", "primary"),
         button("review_mark_snope", "It's a snope"),
         button("review_mark_nas", "Not a snipe"),
         button("review_skip", "Skip for now"),

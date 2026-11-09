@@ -54,12 +54,16 @@ def _default_sniped(entry: Entry, kind: Kind) -> tuple:
 
 
 def apply_state(env: Env, entry_id: str, kind: Kind | str, *, sniped: Optional[Iterable[str]] = None,
-                manual: bool = True, caption: Optional[str] = None) -> Entry:
+                manual: bool = True, caption: Optional[str] = None, allow_incomplete: bool = False) -> Entry:
     """Move an entry to `kind`, then bring Slack and do-not-snipe in line.
 
     `sniped=None` keeps the sensible default for the kind (see _default_sniped);
     pass a list to override. `manual=True` locks the decision against automatic
     re-classification; automatic callers pass False.
+
+    A snipe normally needs someone sniped. `allow_incomplete=True` (used when Zeke
+    marks a photo with a Slack reaction, where there's nowhere to say who) lets it
+    through anyway: it stays a snipe, scores nothing, and shows in the review queue.
     """
     kind = Kind(kind)
     with env.store.db.tx():
@@ -70,7 +74,7 @@ def apply_state(env: Env, entry_id: str, kind: Kind | str, *, sniped: Optional[I
             new_sniped = tuple(dict.fromkeys(s for s in sniped if s))
         else:
             new_sniped = _default_sniped(entry, kind)
-        if kind is Kind.SNIPE and not new_sniped:
+        if kind is Kind.SNIPE and not new_sniped and not allow_incomplete:
             raise InvalidTransition("a snipe needs at least one sniped user")
         changes = {"kind": kind, "sniped": new_sniped}
         if manual:
@@ -179,11 +183,12 @@ def handle_edit(env: Env, channel: str, ts: str, new_text: str) -> Optional[Entr
 # ---------------------------------------------------------------------------
 
 def resolve_pending(env: Env, entry_id: str, kind: Kind | str, sniped: Optional[Iterable[str]] = None) -> Optional[Entry]:
-    """Resolve a pending photo to snipe / snope / NAS. None if it isn't pending
-    any more (someone else got there first) or the kind isn't resolvable."""
+    """Resolve a photo in the review queue (pending, or a snipe with nobody sniped yet)
+    to snipe / snope / NAS. None if it's no longer in the queue (someone else got
+    there first) or the kind isn't resolvable."""
     kind = Kind(kind)
     entry = env.store.entries.get(entry_id)
-    if entry is None or not entry.pending or kind not in RESOLVABLE_KINDS:
+    if entry is None or entry.deleted or not entry.needs_review or kind not in RESOLVABLE_KINDS:
         return None
     if kind is not Kind.SNIPE and sniped is None:
         sniped = ()
