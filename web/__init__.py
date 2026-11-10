@@ -10,7 +10,7 @@ from ..services.entries import EntryNotFound, InvalidTransition
 from ..services.maintenance import JobRunner
 from ..store import Busy
 from . import auth
-from .api import compare, entries, people, scoring, system
+from .api import compare, compare_import, entries, people, scoring, system
 
 
 def create_app(env: Env) -> Flask:
@@ -19,7 +19,7 @@ def create_app(env: Env) -> Flask:
     app.config["RUNNER"] = JobRunner(env)
     auth.install(app, env.cfg)
 
-    for module in (compare, entries, people, scoring, system):
+    for module in (compare, compare_import, entries, people, scoring, system):
         app.register_blueprint(module.bp, url_prefix="/api")
 
     @app.teardown_request

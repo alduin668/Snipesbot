@@ -37,7 +37,7 @@ without a password. Systemd units are in `deploy/`.
 Slack app requirements are unchanged: Socket Mode, the bot scopes the old
 version used (`channels:history`, `reactions:read/write`, `files:read`,
 `chat:write`, `users:read`, `im:write`, `commands`), and the
-`message`, `reaction_added` **and `reaction_removed`** event subscriptions
+`message`, `reaction_added` **and** `reaction_removed` event subscriptions
 (the last is new: un-starring a photo now un-marks it as notable).
 
 ## Where the data lives
@@ -50,7 +50,7 @@ data/
   archive/files/          every photo/video, named by Slack file id (F0123ABC.jpg)
 ```
 
-**The default `data` is relative to the directory you start the process from** (it is resolved to an absolute path at startup),
+**The default** `data` **is relative to the directory you start the process from** (it is resolved to an absolute path at startup),
 so the bot, the webapp and CLI commands must all be started from the same
 place (the systemd units set `WorkingDirectory`) or all given the same absolute
 `SNIPESBOT_DATA_DIR`. Two different working directories means two different,
@@ -74,12 +74,12 @@ anything Slack still has is re-downloaded the first time you open it.
 
 Classification uses only the photo's own caption. Rules, in order:
 
-| Caption | Result |
-|---|---|
-| contains a snope word | **snope** |
-| `@mention` + a snipe word | **snipe** — counts toward the score |
-| only `@mention`s, nothing else | **likely snipe** — needs confirming |
-| `@mention` mixed with other text, or no mention | **unidentified** — needs a human |
+| Caption                                         | Result                              |
+|-------------------------------------------------|-------------------------------------|
+| contains a snope word                           | **snope**                           |
+| `@mention` + a snipe word                       | **snipe** — counts toward the score |
+| only `@mention`s, nothing else                  | **likely snipe** — needs confirming |
+| `@mention` mixed with other text, or no mention | **unidentified** — needs a human    |
 
 Keywords match whole words, case-insensitively, and a negated keyword
 (*"not a snipe"*, *"no snipe"*) doesn't count. The bot reacts with a matching
@@ -90,14 +90,14 @@ emoji: 🟢 snipe · 🟣 snope · 🟠 likely · ❓ unidentified · ⚫ not a 
 Zeke, replying `#snipe @someone` in the thread, using the review DM, or using
 the webapp) is locked: edits and sync never change it. Zeke's reactions:
 
-| Reaction | Effect |
-|---|---|
-| 🟢 / 🟣 / ⚫ | set snipe / snope / not-a-snipe (not over a missnipe) |
-| 🔴 | missnipe — only on a confirmed snipe |
-| 🟠 | confirm a likely snipe as a snipe |
-| ❓ | lock a pending photo as unidentified |
-| 🫆 | send to the **Special** tab |
-| ⭐ | notable (Zeke's star, or 3+ other people's; removable) |
+| Reaction    | Effect                                                 |
+|-------------|--------------------------------------------------------|
+| 🟢 / 🟣 / ⚫ | set snipe / snope / not-a-snipe (not over a missnipe)  |
+| 🔴          | missnipe — only on a confirmed snipe                   |
+| 🟠          | confirm a likely snipe as a snipe                      |
+| ❓           | lock a pending photo as unidentified                   |
+| 🫆          | send to the **Special** tab                            |
+| ⭐           | notable (Zeke's star, or 3+ other people's; removable) |
 
 ## Admin UI
 
@@ -211,7 +211,7 @@ app.py  webapp.py  thin entry points (the old systemd units still work)
 ```
 
 The one rule that keeps this tidy: **everything that changes a photo's
-classification goes through `services.entries.apply_state`**. It updates the
+classification goes through **`services.entries.apply_state`. It updates the
 row in one transaction, then fixes the Slack reaction and runs the
 do-not-snipe check. Callers only decide *what* the new state is.
 

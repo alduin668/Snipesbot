@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { $, $$, el, empty, html, render } from '../dom.js';
+import { paintImportTab } from './compare_import.js';
 
 const SUBS = [['diff', 'Discrepancies'], ['people', 'By person'], ['human', 'Human matrix (edit)'], ['import', 'Paste / notes']];
 const sign = (n) => (n > 0 ? `+${n}` : String(n));
@@ -128,25 +129,7 @@ export function mount(panel) {
     });
   }
 
-  function paintImport() {
-    const text = el('textarea', { class: 'cmp-textarea', placeholder: 'Paste the human’s matrix from a spreadsheet:\n(blank)\tAlice\tBob\nCarol\t4\t1\nAlice\t0\t2' });
-    const go = el('button', { type: 'button', class: 'btn primary', text: 'Replace human matrix with this', onclick: async () => {
-      if (!text.value.trim()) return;
-      if (!confirm('Replace the whole human matrix with the pasted one?')) return;
-      try { const r = await api('/compare/human/import', { method: 'POST', body: { text: text.value } }); alert(`Imported ${r.cells} cell(s).`); text.value = ''; load(); }
-      catch (err) { alert(err.message); }
-    } });
-    const asOf = el('input', { type: 'text', class: 'cell-input', style: 'width:12em', placeholder: 'e.g. 2026-11-01', value: data.meta.as_of || '' });
-    const note = el('textarea', { class: 'cmp-textarea', style: 'min-height:60px', placeholder: 'Notes about this human pass (who did it, what range of the chat it covers)…' });
-    note.value = data.meta.note || '';
-    const save = el('button', { type: 'button', class: 'btn', text: 'Save notes', onclick: async () => {
-      await api('/compare/human/meta', { method: 'POST', body: { as_of: asOf.value, note: note.value } }); load();
-    } });
-    body.replaceChildren(
-      el('div', { class: 'cmp-note', text: 'First row = victim names, first column = sniper names; tab-, comma- or semicolon-separated. Names must match people on the roster. Nothing is saved if any name doesn’t match.' }),
-      text, go,
-      el('h3', { text: 'When was this human pass made?', style: 'margin-top:20px' }), asOf, note, save);
-  }
+  function paintImport() { paintImportTab(body, data, load); }
 
   return { activate: load };
 }
