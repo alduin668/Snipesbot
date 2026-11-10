@@ -16,7 +16,8 @@ export function mount(panel) {
   }));
   const refresh = el('button', { type: 'button', class: 'btn', text: 'Refresh', onclick: () => load() });
   const applyAll = el('button', { type: 'button', class: 'btn primary', text: 'Make True match Human (all)', onclick: async () => {
-    if (!confirm('Write Manual-matrix corrections and Adjustments so the True numbers equal the Human numbers everywhere? (Cells aimed at do-not-snipe people are skipped.)')) return;
+    const when = data && data.summary.cutoff ? ` as of ${data.summary.cutoff.date} (snipes made since then are kept on top)` : '';
+    if (!confirm(`Write Manual-matrix corrections and Adjustments so True equals the Human numbers everywhere${when}? (Cells aimed at do-not-snipe people are skipped.)`)) return;
     const r = await api('/compare/remedy/all', { method: 'POST', body: {} });
     alert(`Fixed ${r.cells_fixed} cell(s) and ${r.adjustments_fixed} adjustment(s).` + (r.dns_skipped ? ` Skipped ${r.dns_skipped} do-not-snipe cell(s) — decide those by hand.` : ''));
     load();
@@ -30,12 +31,17 @@ export function mount(panel) {
   function paint() {
     const s = data.summary;
     const pill = (label, v, kind = '') => html`<div class="cmp-pill ${kind}">${label}<b>${v}</b></div>`;
+    const hasHuman = Object.keys(data.human_cells).length > 0;
+    const banner = s.cutoff
+      ? html`<div class="cmp-note">Everything here is counted through the end of <b>${s.cutoff.date}</b>, the day of the human pass. Applying a fix brings True to the human’s numbers as of that day; the ${s.cutoff.excluded} snipe(s) made since stay on top.</div>`
+      : hasHuman ? html`<div class="cmp-note">⚠ No date is set for the human pass, so every snipe up to today is compared and newer ones look like bot over-counts. Set the date in “Paste / notes”.</div>` : '';
     render(summary, html`<div class="cmp-summary">
       ${pill('Human total', s.human_total)}${pill('Bot total', s.bot_total)}${pill('True total (bot + manual)', s.true_total)}
       ${pill('Bot missed', s.bot_missed, s.bot_missed ? 'bad' : 'good')}${pill('Bot over-counted', s.bot_overcounted, s.bot_overcounted ? 'bad' : 'good')}
       ${pill('Cells still wrong in True', s.cells_still_wrong, s.cells_still_wrong ? 'bad' : 'good')}
       ${pill('People with a score gap', s.people_score_gap, s.people_score_gap ? 'bad' : 'good')}</div>
-      ${data.meta.as_of || data.meta.note ? html`<div class="cmp-note">Human truth as of <b>${data.meta.as_of || '—'}</b>. ${data.meta.note}</div>` : ''}`);
+      ${banner}
+      ${data.meta.note ? html`<div class="cmp-note">${data.meta.note}</div>` : ''}`);
     ({ diff: paintDiff, people: paintPeople, human: paintHuman, import: paintImport })[sub]();
   }
 
@@ -65,6 +71,16 @@ export function mount(panel) {
       await api('/compare/remedy/cell', { method: 'POST', body: { sniper: d.sniper, victim: d.victim } });
       load();
     }));
+
+    // Snipes made after the human pass: still counted, but small and not errors.
+    const since = data.since || [];
+    if (since.length && data.summary.cutoff) {
+      const det = el('details', { style: 'margin-top:22px;font-size:0.76rem;opacity:0.65' },
+        el('summary', { text: `Since the human pass (after ${data.summary.cutoff.date}): ${data.summary.cutoff.excluded} newer snipe(s) in ${since.length} cell(s) — not errors, no human number to compare them to yet` }),
+        el('div', { style: 'display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:6px' },
+          ...since.map((d) => el('span', { text: `${d.sniper_name} → ${d.victim_name}  +${d.count}` }))));
+      body.append(det);
+    }
   }
 
   function paintPeople() {
@@ -83,7 +99,6 @@ export function mount(panel) {
 
   function paintHuman() {
     const users = data.users, cells = data.human_cells, adj = data.human_adjustments;
-    const tot = {};
     render(body, html`<div class="cmp-note">The human’s matrix: type the numbers from the full read-through. Saves as you go; Discrepancies updates when you switch tabs. Adjustment is the human’s per-person adjustment.</div>
       <div class="matrix-scroll"><table class="matrix-table"><thead><tr><th>Sniper \\ Victim</th><th>Snipes</th>${users.map((u) => html`<th>${u.display}</th>`)}<th>Sniped</th><th>Adjustment</th><th>Score</th></tr></thead>
       <tbody>${users.map((r) => html`<tr><td>${r.display}</td><td class="row-total" data-rt="${r.id}">0</td>
