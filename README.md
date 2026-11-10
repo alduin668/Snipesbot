@@ -102,7 +102,29 @@ the webapp) is locked: edits and sync never change it. Zeke's reactions:
 ## Admin UI
 
 Live Log · Review Queue · Manual Decisions · Special · Search · Do Not Snipe ·
-Analysis · Matrix · Adjustments · Maintenance.
+Analysis · Matrix · Compare · Adjustments · Maintenance.
+
+**Roster.** The Matrix, Adjustments and Compare grids list only people @ed in
+the snipes channel, people who post in or belong to it, and people on the
+do-not-snipe list (plus anyone who already has a manual number). The cached
+workspace directory is used for *names*, never to decide who is on the roster.
+Channel membership is cached from Slack once a day (needs `channels:read`; without it,
+posters and @mentions still count).
+
+**Matrix (True view)** is live-editable: cells, each person's Adjustment, and
+their Score. Totals recompute as you type; typing a Score stores the Adjustment
+that reaches it.
+
+**Compare** holds the bot against a human read-through of the whole chat. Enter
+or paste the human's matrix and adjustments; the tab lists every cell that
+differs (Human − Bot: positive = bot missed, negative = over-counted), the photos
+worth re-checking for mislabels, and a one-click remedy that writes the needed
+Manual correction so True equals Human. Cells aimed at do-not-snipe people are
+flagged and skipped by "apply all". The human numbers never feed the live
+leaderboard on their own.
+
+**Analysis** opens with the current logic of every analysis (single source:
+`analysis/logic.py`); all rankings are sorted highest to lowest.
 
 **Review Queue** holds everything that needs a decision: unidentified photos,
 likely snipes, and **snipes with nobody recorded as sniped**. That last group is

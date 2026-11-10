@@ -112,6 +112,52 @@ class ScoringStore:
             self.db.execute("DELETE FROM manual_matrix WHERE sniper = ? AND victim = ?", (sniper, victim))
 
 
+class HumanStore:
+    """The matrix + per-person adjustments a human produced by reading the whole
+    chat log. It is the reference the Compare tab holds the bot against; it never
+    feeds the live leaderboard (only the Manual matrix / Adjustments do that)."""
+
+    META_KEY = "human_truth_meta"
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def matrix(self) -> dict:
+        out: dict = {}
+        for r in self.db.query("SELECT * FROM human_matrix"):
+            out.setdefault(r["sniper"], {})[r["victim"]] = r["value"]
+        return out
+
+    def set_cell(self, sniper: str, victim: str, value: int) -> None:
+        if value:
+            self.db.execute(
+                """INSERT INTO human_matrix (sniper, victim, value) VALUES (?,?,?)
+                   ON CONFLICT(sniper, victim) DO UPDATE SET value = excluded.value""",
+                (sniper, victim, value),
+            )
+        else:
+            self.db.execute("DELETE FROM human_matrix WHERE sniper = ? AND victim = ?", (sniper, victim))
+
+    def adjustments(self) -> dict:
+        return {r["user_id"]: r["value"] for r in self.db.query("SELECT * FROM human_adjustments")}
+
+    def set_adjustment(self, user_id: str, value: float) -> None:
+        if value:
+            self.db.execute(
+                "INSERT INTO human_adjustments (user_id, value) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET value = excluded.value", (user_id, value))
+        else:
+            self.db.execute("DELETE FROM human_adjustments WHERE user_id = ?", (user_id,))
+
+    def replace_matrix(self, cells: dict) -> None:
+        """Swap the whole human matrix for `cells` ({sniper: {victim: n}}) in one transaction."""
+        with self.db.tx():
+            self.db.execute("DELETE FROM human_matrix")
+            self.db.executemany(
+                "INSERT INTO human_matrix (sniper, victim, value) VALUES (?,?,?)",
+                [(s, v, n) for s, row in cells.items() for v, n in row.items() if n])
+
+
 class Names(dict):
     """user id -> display name, plus which names are shared by more than one person
     (so they can be told apart instead of showing two identical labels)."""

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
+from ...analysis import logic
 from ...analysis.stats import Stats
-from ...services import people
+from ...services import people, roster
 from ..deps import env
 
 bp = Blueprint("scoring", __name__)
@@ -15,11 +16,12 @@ def _names_for(user_ids) -> dict:
     return env().store.names.all()
 
 
-def _roster(stats: Stats) -> list:
-    """Everyone with a name, in the matrices, or with an adjustment -- ordered by
-    True row total then name, so all matrix views and the Adjustments tab line up."""
+def _roster(stats: Stats, *extra) -> list:
+    """The snipes-channel roster only (people @ed there, people in it, do-not-snipe
+    people, and anyone with a manual number) -- NOT the whole Slack workspace.
+    Ordered by True row total then name so every matrix view lines up."""
     true = stats.true_matrix()
-    users = set(env().store.names.all()) | set(stats.coded_matrix()["users"]) | set(true["users"]) | set(stats.adjustments)
+    users = roster.roster_ids(env(), stats.coded_matrix()["users"], true["users"], stats.adjustments, *extra)
     names = _names_for(users)
     return sorted(users, key=lambda u: (-true["row_totals"].get(u, 0), (names.get(u) or u).lower()))
 
@@ -31,6 +33,7 @@ def _matrix_json(stats, order, row_totals, col_totals, cells, editable):
         "row_totals": {u: row_totals.get(u, 0) for u in order},
         "col_totals": {u: col_totals.get(u, 0) for u in order},
         "cells": cells, "editable": editable,
+        "adjustments": {u: stats.adjustments.get(u, 0) for u in order},
     })
 
 
@@ -137,3 +140,9 @@ def analysis():
         "group_snipe_as_sniper": named(as_sniper), "group_snipe_as_victim": named(as_victim),
         "queue_size": stats.pending_count,
     })
+
+
+@bp.get("/analysis/logic")
+def analysis_logic():
+    """The plain-words logic behind every analysis (single source: analysis/logic.py)."""
+    return jsonify(logic.describe())

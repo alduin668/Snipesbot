@@ -22,7 +22,7 @@ await import(process.env.JS_MAIN || '../../snipesbot/web/static/js/main.js');
 await sleep(800);
 
 // ---------------- every tab renders without error ----------------
-for (const name of ['livelog', 'review', 'manual', 'special', 'search', 'dns', 'analysis', 'matrix', 'adjustments', 'maintenance']) {
+for (const name of ['livelog', 'review', 'manual', 'special', 'search', 'dns', 'analysis', 'matrix', 'compare', 'adjustments', 'maintenance']) {
   const panel = await tab(name, 900);
   const text = panel.textContent;
   check(`tab "${name}" renders`, panel.classList.contains('active') && text.trim().length > 0 && !text.includes('Something went wrong'), text.slice(0, 120));
@@ -159,6 +159,32 @@ const ai = $('.adj-input', adj); ai.value = '2.5'; ai.dispatchEvent(new window.E
 check('adjustment saves', (await api('/adjustments')).users.some((u) => u.adjustment === 2.5));
 const an = await tab('analysis', 900);
 check('analysis shows the leaderboard', an.textContent.includes('Leaderboard') && an.textContent.includes('Rivalries'));
+check('analysis lists the current logic of every analysis', an.textContent.includes('How every analysis works') && an.textContent.includes('Retaliation speed') && an.textContent.includes('Score = Snipes'));
+
+// ---- matrix: the big number (Score) is editable live ----
+const mx = await tab('matrix', 900);
+$$('.matrix-subtab-btn', mx).find((b) => b.textContent === 'True').click(); await sleep(900);
+const si = $('.score-input', mx);
+check('true matrix has Adjustment and Score columns', !!si && !!$('.adj-input', mx));
+const uid = si.dataset.user;
+const rt = Number($$('[data-rt]', mx).find((c) => c.dataset.rt === uid).textContent), ct = Number($$('[data-ct]', mx).find((c) => c.dataset.ct === uid).textContent);
+si.value = '10'; si.dispatchEvent(new window.Event('change')); await sleep(900);
+check('typing a Score saves the adjustment that reaches it', (await api('/adjustments')).users.find((u) => u.id === uid).adjustment === 10 - (rt - ct), JSON.stringify((await api('/adjustments')).users.find((u) => u.id === uid)));
+const c1 = $$('.cell-input[data-sniper]', mx)[0]; const rtBefore = $$('[data-rt]', mx).find((c) => c.dataset.rt === c1.dataset.sniper).textContent;
+c1.value = String(Number(c1.value) + 7); c1.dispatchEvent(new window.Event('input'));
+check('editing a cell updates the totals live, before saving', $$('[data-rt]', mx).find((c) => c.dataset.rt === c1.dataset.sniper).textContent !== rtBefore);
+c1.dispatchEvent(new window.Event('change')); await sleep(700);
+
+// ---- compare: human truth vs bot, and its remedy ----
+const trueM = await api('/matrix/true');
+const hs = trueM.users[0].id, hv = trueM.users[1].id;
+await fetch(BASE + '/api/compare/human/cell', { method: 'POST', headers: { 'X-Requested-With': 'snipesbot', 'Content-Type': 'application/json' }, body: JSON.stringify({ sniper: hs, victim: hv, value: 9 }) });
+const cp = await tab('compare', 1200);
+check('compare tab lists the discrepancy with an Apply button', cp.textContent.includes('Discrepancies') && !!$('[data-fix]', cp), cp.textContent.slice(0, 200));
+$('[data-fix]', cp).click(); await sleep(1200);
+check('applying the remedy makes True equal the human', ((await api('/matrix/true')).cells[hs] || {})[hv] === 9);
+$$('.matrix-subtab-btn', cp).find((b) => b.textContent.startsWith('Human')).click(); await sleep(300);
+check('human matrix grid is editable', $$('.cell-input[data-s]', cp).length > 0);
 
 // ---------------- Maintenance ----------------
 const m = await tab('maintenance', 900);

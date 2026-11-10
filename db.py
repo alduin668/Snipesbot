@@ -86,6 +86,14 @@ _MIGRATIONS = [
         PRIMARY KEY (channel, ts)
     );
     """,
+    # --- v2: the human-provided "truth" used by the Compare tab ----------------
+    """
+    CREATE TABLE human_matrix (
+        sniper TEXT NOT NULL, victim TEXT NOT NULL, value INTEGER NOT NULL,
+        PRIMARY KEY (sniper, victim)
+    );
+    CREATE TABLE human_adjustments (user_id TEXT PRIMARY KEY, value REAL NOT NULL)
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)

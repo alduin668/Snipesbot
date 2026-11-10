@@ -24,7 +24,7 @@ from typing import Callable, Optional
 from ..env import Env
 from ..models import Kind
 from ..slack_io import sync_reaction
-from . import archiver, entries as entry_service, people
+from . import archiver, entries as entry_service, people, roster
 
 log = logging.getLogger("snipesbot")
 
@@ -72,6 +72,8 @@ def run_sync(env: Env, *, since: Optional[float] = None, full: bool = False,
         stats.names = people.refresh_directory(env)       # no-op if refreshed within 24h
         if stats.names:
             progress(f"[sync] cached {stats.names} member names")
+
+        roster.refresh_channel_members(env)               # no-op if refreshed within 24h
 
         res = archiver.sync_from_slack(env, since, progress)
         stats.archived, stats.replies = res["archived"], res["replies"]

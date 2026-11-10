@@ -303,3 +303,27 @@ tr.no-points td { color: #8d8d8d; font-style: italic; }
   .focus-media { height: 45vh; }
   .focus-thread { max-height: 40vh; }
 }
+
+    /* Matrix: the Score column is the "big number" */
+    .matrix-table input.big-number { width: 5.2em; font-size: 1.1rem; font-weight: 700; color: #ffd54f; }
+    .matrix-table input.adj-input { width: 4.2em; }
+
+    /* Compare tab */
+    .cmp-summary { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+    .cmp-pill { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 6px 12px; font-size: 0.85rem; color: #bbb; }
+    .cmp-pill b { display: block; font-size: 1.3rem; color: #eee; }
+    .cmp-pill.bad b { color: #ff8a80; } .cmp-pill.good b { color: #81c784; }
+    table.cmp-table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+    .cmp-table th, .cmp-table td { border-bottom: 1px solid #2a2a2a; padding: 5px 8px; text-align: left; vertical-align: top; }
+    .cmp-table th { color: #999; font-weight: 600; position: sticky; top: 0; background: #151515; }
+    .cmp-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .cmp-table tr.resolved td { opacity: 0.5; }
+    .diff-pos { color: #ffb74d; font-weight: 700; } .diff-neg { color: #ff8a80; font-weight: 700; } .diff-zero { color: #81c784; }
+    .cmp-suspect { font-size: 0.8rem; color: #aaa; margin: 2px 0; }
+    .cmp-suspect span.k { color: #6cb6ff; }
+    .cmp-note { color: #aaa; font-size: 0.85rem; margin: 6px 0; }
+    .cmp-textarea { width: 100%; min-height: 120px; background: #1a1a1a; color: #ddd; border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: monospace; }
+    details.logic { background: #1a1a1a; border: 1px solid #2c2c2c; border-radius: 8px; padding: 8px 14px; margin-bottom: 16px; }
+    details.logic summary { cursor: pointer; font-weight: 600; color: #ccc; }
+    details.logic li { margin: 4px 0; color: #bbb; font-size: 0.88rem; }
+    details.logic .order { color: #6cb6ff; font-size: 0.8rem; }

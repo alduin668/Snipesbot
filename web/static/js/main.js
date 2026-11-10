@@ -11,6 +11,7 @@ const TABS = {
   dns: () => import('./tabs/dns.js'),
   analysis: () => import('./tabs/analysis.js'),
   matrix: () => import('./tabs/matrix.js'),
+  compare: () => import('./tabs/compare.js'),
   adjustments: () => import('./tabs/adjustments.js'),
   maintenance: () => import('./tabs/maintenance.js'),
 };

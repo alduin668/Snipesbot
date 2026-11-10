@@ -1,0 +1,1339 @@
+From aca468dffc0131ea711c9b985d79e8874041c233 Mon Sep 17 00:00:00 2001
+From: claude <claude@example.com>
+Date: Tue, 10 Nov 2026 02:38:53 +0000
+Subject: [PATCH] Roster limited to snipes-channel people; Compare tab (human
+ vs bot); live-editable matrix score; analysis logic + sorted leaderboards
+
+---
+ README.md                      |  24 ++++-
+ analysis/compare.py            | 124 ++++++++++++++++++++++
+ analysis/logic.py              |  67 ++++++++++++
+ db.py                          |   8 ++
+ services/roster.py             |  85 +++++++++++++++
+ services/sync.py               |   4 +-
+ store/__init__.py              |   3 +-
+ store/misc.py                  |  46 +++++++++
+ tests/frontend/smoke.mjs       |  28 ++++-
+ tests/test_compare_roster.py   |  98 ++++++++++++++++++
+ web/__init__.py                |   4 +-
+ web/api/compare.py             | 183 +++++++++++++++++++++++++++++++++
+ web/api/scoring.py             |  19 +++-
+ web/static/js/main.js          |   1 +
+ web/static/js/tabs/analysis.js |  50 +++++----
+ web/static/js/tabs/compare.js  | 152 +++++++++++++++++++++++++++
+ web/static/js/tabs/matrix.js   |  99 +++++++++++++++---
+ web/static/style.css           |  24 +++++
+ web/templates/index.html       |   2 +
+ 19 files changed, 974 insertions(+), 47 deletions(-)
+ create mode 100644 analysis/compare.py
+ create mode 100644 analysis/logic.py
+ create mode 100644 services/roster.py
+ create mode 100644 tests/test_compare_roster.py
+ create mode 100644 web/api/compare.py
+ create mode 100644 web/static/js/tabs/compare.js
+
+diff --git a/README.md b/README.md
+index d20bfaa..2554f8a 100644
+--- a/README.md
++++ b/README.md
+@@ -102,7 +102,29 @@ the webapp) is locked: edits and sync never change it. Zeke's reactions:
+ ## Admin UI
+ 
+ Live Log · Review Queue · Manual Decisions · Special · Search · Do Not Snipe ·
+-Analysis · Matrix · Adjustments · Maintenance.
++Analysis · Matrix · Compare · Adjustments · Maintenance.
++
++**Roster.** The Matrix, Adjustments and Compare grids list only people @ed in
++the snipes channel, people who post in or belong to it, and people on the
++do-not-snipe list (plus anyone who already has a manual number). The cached
++workspace directory is used for *names*, never to decide who is on the roster.
++Channel membership is cached from Slack once a day (needs `channels:read`; without it,
++posters and @mentions still count).
++
++**Matrix (True view)** is live-editable: cells, each person's Adjustment, and
++their Score. Totals recompute as you type; typing a Score stores the Adjustment
++that reaches it.
++
++**Compare** holds the bot against a human read-through of the whole chat. Enter
++or paste the human's matrix and adjustments; the tab lists every cell that
++differs (Human − Bot: positive = bot missed, negative = over-counted), the photos
++worth re-checking for mislabels, and a one-click remedy that writes the needed
++Manual correction so True equals Human. Cells aimed at do-not-snipe people are
++flagged and skipped by "apply all". The human numbers never feed the live
++leaderboard on their own.
++
++**Analysis** opens with the current logic of every analysis (single source:
++`analysis/logic.py`); all rankings are sorted highest to lowest.
+ 
+ **Review Queue** holds everything that needs a decision: unidentified photos,
+ likely snipes, and **snipes with nobody recorded as sniped**. That last group is
+diff --git a/analysis/compare.py b/analysis/compare.py
+new file mode 100644
+index 0000000..c06f3be
+--- /dev/null
++++ b/analysis/compare.py
+@@ -0,0 +1,124 @@
++"""
++Human truth vs. the bot.
++
++Every so often a person reads the whole chat log and produces a matrix (who
++sniped whom, how many times) and per-person adjustments. This module holds the
++bot's numbers up against it, cell by cell, and says how to close each gap.
++
++  human   the human's cell                (human_matrix)
++  bot     the bot's cell, untouched       (Stats.coded_matrix)
++  true    bot + manual corrections        (Stats.true_matrix) -- what scores today
++  diff    human - bot                     >0 the bot missed snipes, <0 it over-counted
++  remedy  the Manual-matrix value that makes True equal the human: human - bot
++  gap     human - true                    what is still wrong after today's corrections
++
++For every wrong cell it lists the entries worth looking at: if the bot
++over-counted, its own confirmed snipes for that pair (one is probably mislabeled);
++if it missed some, that sniper's non-snipe photos that mention the victim, and
++their snipes with nobody recorded (probably mislabeled or incomplete).
++"""
++from __future__ import annotations
++
++from ..classifier import MENTION_RE
++from ..models import Kind
++from ..services import people
++from .stats import Stats
++
++_MAX_SUSPECTS = 8
++
++
++def _entry_brief(e, names, tz) -> dict:
++    return {"id": e.id, "date": e.local_time(tz).strftime("%Y-%m-%d"), "kind": e.kind.label,
++            "kind_key": e.kind.value, "sniper": people.display(e.sniper, names),
++            "sniped": [people.display(v, names) for v in e.sniped],
++            "caption": people.render_text(e.caption, names)[:160], "manual": e.manually_resolved}
++
++
++def _suspects(stats: Stats, sniper: str, victim: str, diff: int, names) -> list:
++    tz = stats.tz
++    out = []
++    if diff < 0:                                   # bot over-counted: look at its own snipes for this pair
++        pool = [e for e in stats.snipes if e.sniper == sniper and victim in e.sniped]
++    else:                                          # bot missed: look at what it did NOT count
++        pool = []
++        for e in stats.env.store.entries.all_active():
++            if e.sniper != sniper or e.kind is Kind.SPECIAL:
++                continue
++            mentions = set(e.sniped) | set(MENTION_RE.findall(e.caption or ""))
++            if e.kind is Kind.SNIPE and e.sniped:
++                continue                           # already counted
++            if victim in mentions or e.incomplete:
++                pool.append(e)
++    pool.sort(key=lambda e: -e.posted_at)
++    return [_entry_brief(e, names, tz) for e in pool[:_MAX_SUSPECTS]]
++
++
++def compare(stats: Stats, human_cells: dict, human_adj: dict, names) -> dict:
++    coded = stats.coded_matrix()["cells"]
++    true = stats.true_matrix()["cells"]
++    manual = stats.manual
++    users = set(coded) | {v for r in coded.values() for v in r}
++    users |= set(true) | {v for r in true.values() for v in r}
++    users |= set(human_cells) | {v for r in human_cells.values() for v in r}
++    users |= set(human_adj) | set(stats.adjustments) | stats.dns
++
++    cell = lambda m, s, v: (m.get(s) or {}).get(v, 0)          # noqa: E731
++    discrepancies, matched = [], 0
++    for s in sorted(users):
++        for v in sorted(users):
++            if s == v:
++                continue
++            h, b, t = cell(human_cells, s, v), cell(coded, s, v), cell(true, s, v)
++            if h == b == t:
++                matched += 1 if h else 0
++                continue
++            if h == b and h == t:
++                continue
++            diff, gap = h - b, h - t
++            if diff == 0 and gap == 0:
++                continue
++            discrepancies.append({
++                "sniper": s, "victim": v,
++                "sniper_name": people.display(s, names), "victim_name": people.display(v, names),
++                "human": h, "bot": b, "true": t, "manual": cell(manual, s, v),
++                "diff": diff, "remedy": diff, "gap": gap, "resolved": gap == 0,
++                "dns": v in stats.dns,
++                "suspects": [] if gap == 0 else _suspects(stats, s, v, diff, names),
++            })
++    discrepancies.sort(key=lambda d: (d["resolved"], -abs(d["diff"]), d["sniper_name"].lower()))
++
++    row = lambda m, u: sum((m.get(u) or {}).values())          # noqa: E731
++    col = lambda m, u: sum(r.get(u, 0) for r in m.values())    # noqa: E731
++    bot_adj = stats.adjustments
++    persons = []
++    for u in sorted(users, key=lambda u: people.display(u, names).lower()):
++        hs, hd = row(human_cells, u), col(human_cells, u)
++        bs, bd = row(coded, u), col(coded, u)
++        ts, td = row(true, u), col(true, u)
++        ha, ta = human_adj.get(u, 0) or 0, bot_adj.get(u, 0) or 0
++        h_score, b_score, t_score = hs - hd + ha, bs - bd, ts - td + ta
++        persons.append({
++            "id": u, "name": people.display(u, names),
++            "human": {"snipes": hs, "sniped": hd, "adjustment": ha, "score": h_score},
++            "bot": {"snipes": bs, "sniped": bd, "adjustment": 0, "score": b_score},
++            "true": {"snipes": ts, "sniped": td, "adjustment": ta, "score": t_score},
++            "diff": {"snipes": hs - bs, "sniped": hd - bd, "score": h_score - b_score},
++            "gap": {"snipes": hs - ts, "sniped": hd - td, "adjustment": ha - ta, "score": h_score - t_score},
++        })
++    persons = [p for p in persons if any(p[k]["snipes"] or p[k]["sniped"] or p[k]["adjustment"]
++                                         for k in ("human", "bot", "true")) or p["id"] in stats.dns]
++    open_cells = [d for d in discrepancies if not d["resolved"]]
++    return {
++        "discrepancies": discrepancies, "persons": persons,
++        "summary": {
++            "cells_wrong_vs_bot": sum(1 for d in discrepancies if d["diff"]),
++            "cells_still_wrong": len(open_cells),
++            "cells_matching": matched,
++            "bot_missed": sum(d["diff"] for d in discrepancies if d["diff"] > 0),
++            "bot_overcounted": -sum(d["diff"] for d in discrepancies if d["diff"] < 0),
++            "people_score_gap": sum(1 for p in persons if p["gap"]["score"]),
++            "human_total": sum(sum(r.values()) for r in human_cells.values()),
++            "bot_total": sum(sum(r.values()) for r in coded.values()),
++            "true_total": sum(sum(r.values()) for r in true.values()),
++        },
++    }
+diff --git a/analysis/logic.py b/analysis/logic.py
+new file mode 100644
+index 0000000..c47fa41
+--- /dev/null
++++ b/analysis/logic.py
+@@ -0,0 +1,67 @@
++"""
++The current logic of every analysis, in plain words, for the Analysis tab.
++Keep this in step with analysis/stats.py and classifier.py: it is what a person
++reads to understand why a number is what it is.
++"""
++from __future__ import annotations
++
++CLASSIFICATION = [
++    "A photo is judged from its own caption only.",
++    "1. A snope word wins, with or without an @mention  → Snope.",
++    "2. @mention + a snipe word  → Snipe (counts toward the score).",
++    "3. Only @mention(s), nothing else  → Likely snipe (waits in the Review Queue).",
++    "4. @mention mixed with ordinary text, or no @mention  → Unidentified (needs a human).",
++    "Keywords match whole words, case-insensitively; a negated keyword (“not a snipe”, “no snipe”) doesn't count.",
++    "Anything a person decides is locked: syncs and edits never change it.",
++]
++
++SCORING = [
++    "Only confirmed Snipe entries are events. Each victim of a snipe is one cell: sniper → victim, +1.",
++    "Do-not-snipe rule: a snipe of someone on the do-not-snipe list is still logged (streaks, activity, Live Log) "
++    "but scores nothing for the sniper or the victim, and is left out of every matrix. In a group snipe the other victims still score.",
++    "Coded matrix = what the bot counted. Manual matrix = hand corrections per cell (can be negative). "
++    "True matrix = Coded + Manual, cell by cell.",
++    "Snipes = a person's True row total; Sniped = their True column total.",
++    "Score = Snipes − Sniped + that person's Adjustment (the adjustment may be fractional or negative).",
++    "Roster: only people @ed in the snipes channel, people in it, and people on the do-not-snipe list "
++    "(plus anyone who already has a manual number), never the whole Slack workspace.",
++]
++
++#: One entry per analysis shown on the Analysis tab: key matches the API field.
++ANALYSES = [
++    {"key": "leaderboard", "title": "Leaderboard", "order": "Score high → low",
++     "logic": "Score = Snipes − Sniped + Adjustment, from the True matrix. Sorted by score, then by Snipes, then by name. "
++              "Ties share a rank and the next rank is skipped (1, 2, 2, 4)."},
++    {"key": "rivalries", "title": "Rivalries", "order": "Most snipes between the pair, high → low",
++     "logic": "For each pair of people, count every scoring snipe between them in either direction "
++              "(A→B and B→A together). The top 5 pairs are shown."},
++    {"key": "no_points", "title": "No-points snipes", "order": "Newest first (recent list); by-sniper high → low",
++     "logic": "Snipes that hit someone on the do-not-snipe list. Logged but unscored. "
++              "Shows the total, the 20 most recent, and a count per sniper."},
++    {"key": "streaks", "title": "Sniping streaks", "order": "Longest streak (days) high → low",
++     "logic": "For each sniper, the longest run of consecutive calendar days (in the configured timezone) "
++              "on which they posted at least one confirmed snipe. Includes no-points snipes."},
++    {"key": "untouchable", "title": "Untouchable", "order": "Most days since last sniped, high → low",
++     "logic": "For each person who has been sniped (scoring snipes only), the whole days since the most recent "
++              "time they were sniped. Bigger = harder to catch."},
++    {"key": "retaliation_speed", "title": "Retaliation speed", "order": "Slowest average first (hours, high → low)",
++     "logic": "When A snipes B, look forward up to 48 hours for B sniping A back. The first such reply counts. "
++              "A person's number is the average hours it took them to retaliate. Only people who retaliated appear."},
++    {"key": "peak_by_day", "title": "Peak days", "order": "Most snipes, high → low",
++     "logic": "Confirmed snipes grouped by weekday (local time)."},
++    {"key": "peak_by_bucket", "title": "Peak time of day", "order": "Most snipes, high → low",
++     "logic": "Confirmed snipes grouped by local time: morning 05–12, afternoon 12–17, evening 17–21, otherwise night."},
++    {"key": "notable_ratio", "title": "Notable ratio", "order": "Highest share, high → low",
++     "logic": "Share of a sniper's confirmed snipes that were marked notable (⭐ by Zeke, 3+ stars from others, "
++              "or set by hand). Only snipers with at least 3 snipes are listed."},
++    {"key": "group_snipe_as_sniper", "title": "Group snipes: as sniper", "order": "Most, high → low",
++     "logic": "How many snipes with two or more victims each person posted."},
++    {"key": "group_snipe_as_victim", "title": "Group snipes: as victim", "order": "Most, high → low",
++     "logic": "How many times each person was one of several victims in a group snipe."},
++    {"key": "queue_size", "title": "Review queue size", "order": "—",
++     "logic": "Photos needing a decision: unidentified, likely snipes, and snipes with nobody recorded as sniped."},
++]
++
++
++def describe() -> dict:
++    return {"classification": CLASSIFICATION, "scoring": SCORING, "analyses": ANALYSES}
+diff --git a/db.py b/db.py
+index c952891..2fc4431 100644
+--- a/db.py
++++ b/db.py
+@@ -86,6 +86,14 @@ _MIGRATIONS = [
+         PRIMARY KEY (channel, ts)
+     );
+     """,
++    # --- v2: the human-provided "truth" used by the Compare tab ----------------
++    """
++    CREATE TABLE human_matrix (
++        sniper TEXT NOT NULL, victim TEXT NOT NULL, value INTEGER NOT NULL,
++        PRIMARY KEY (sniper, victim)
++    );
++    CREATE TABLE human_adjustments (user_id TEXT PRIMARY KEY, value REAL NOT NULL)
++    """,
+ ]
+ 
+ SCHEMA_VERSION = len(_MIGRATIONS)
+diff --git a/services/roster.py b/services/roster.py
+new file mode 100644
+index 0000000..0777d32
+--- /dev/null
++++ b/services/roster.py
+@@ -0,0 +1,85 @@
++"""
++Who is on the roster.
++
++The matrices, adjustments and Compare grid used to include every cached name
++in the whole Slack workspace, which made them enormous. The roster is now only:
++
++  * people @mentioned in the snipes channel (messages, and entries' victims)
++  * people who post in the snipes channel, and its members (cached from Slack)
++  * people on the do-not-snipe list
++
++plus anyone who already has a manual/human number or adjustment, so an edit
++can never silently disappear from the page.
++"""
++from __future__ import annotations
++
++import logging
++import time
++from typing import Iterable
++
++from ..classifier import MENTION_RE
++from ..env import Env
++
++log = logging.getLogger("snipesbot")
++
++MEMBERS_KEY = "channel_members"
++MEMBERS_AT_KEY = "channel_members_refreshed_at"
++
++
++def refresh_channel_members(env: Env, *, force: bool = False, max_age: float = 24 * 3600) -> int:
++    """Cache the snipes channel's member ids (needs channels:read / groups:read).
++    Returns how many were stored, 0 if skipped or it failed (posters still count)."""
++    last = env.store.settings.get(MEMBERS_AT_KEY)
++    if env.slack is None or (not force and last and time.time() - last < max_age):
++        return 0
++    found, cursor = [], None
++    try:
++        while True:
++            resp = env.slack.conversations_members(channel=env.cfg.channel_id, cursor=cursor, limit=200)
++            found += list(resp.get("members", []) or [])
++            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
++            if not cursor:
++                break
++    except Exception as exc:  # noqa: BLE001
++        log.warning("could not list #snipes members (needs channels:read): %s", exc)
++        return 0
++    try:
++        bot = env.bot_user_id()
++    except Exception:  # noqa: BLE001
++        bot = None
++    found = [u for u in dict.fromkeys(found) if u != bot]
++    env.store.settings.set(MEMBERS_KEY, found)
++    env.store.settings.set(MEMBERS_AT_KEY, time.time())
++    return len(found)
++
++
++def participants(env: Env) -> set:
++    """Everyone who belongs in the snipes channel's world (see module docstring)."""
++    store, channel = env.store, env.cfg.channel_id
++    people: set = set(store.dns.list())
++    people |= set(store.settings.get(MEMBERS_KEY) or [])
++    for e in store.entries.all_active():
++        if e.channel == channel:
++            people.add(e.sniper)
++            people.update(e.sniped)
++    rows = store.db.query(
++        "SELECT user, text FROM messages WHERE channel = ? AND deleted = 0 AND bot_id IS NULL", (channel,))
++    for r in rows:
++        if r["user"]:
++            people.add(r["user"])
++        people.update(MENTION_RE.findall(r["text"] or ""))
++    people.discard("")
++    people.discard(None)
++    return people
++
++
++def roster_ids(env: Env, *extra: Iterable[str]) -> set:
++    """participants + everyone with a manual cell/adjustment (+ any `extra` ids)."""
++    s = env.store
++    ids = participants(env)
++    manual = s.scoring.matrix()
++    ids |= set(manual) | {v for row in manual.values() for v in row}
++    ids |= set(s.scoring.adjustments())
++    for more in extra:
++        ids |= set(more)
++    return ids
+diff --git a/services/sync.py b/services/sync.py
+index 036ec6c..2027c83 100644
+--- a/services/sync.py
++++ b/services/sync.py
+@@ -24,7 +24,7 @@ from typing import Callable, Optional
+ from ..env import Env
+ from ..models import Kind
+ from ..slack_io import sync_reaction
+-from . import archiver, entries as entry_service, people
++from . import archiver, entries as entry_service, people, roster
+ 
+ log = logging.getLogger("snipesbot")
+ 
+@@ -73,6 +73,8 @@ def run_sync(env: Env, *, since: Optional[float] = None, full: bool = False,
+         if stats.names:
+             progress(f"[sync] cached {stats.names} member names")
+ 
++        roster.refresh_channel_members(env)               # no-op if refreshed within 24h
++
+         res = archiver.sync_from_slack(env, since, progress)
+         stats.archived, stats.replies = res["archived"], res["replies"]
+ 
+diff --git a/store/__init__.py b/store/__init__.py
+index 98701ea..7359d0f 100644
+--- a/store/__init__.py
++++ b/store/__init__.py
+@@ -6,7 +6,7 @@ from pathlib import Path
+ from ..db import Database
+ from .archive import ArchiveStore, media_files
+ from .entries import EntryStore
+-from .misc import (Busy, DnsStore, LockStore, NameStore, ScoringStore,
++from .misc import (Busy, DnsStore, HumanStore, LockStore, NameStore, ScoringStore,
+                    SettingsStore, TestMessageStore)
+ 
+ __all__ = ["Store", "Busy", "media_files"]
+@@ -21,6 +21,7 @@ class Store:
+         self.dns = DnsStore(db)
+         self.scoring = ScoringStore(db)
+         self.names = NameStore(db)
++        self.human = HumanStore(db)
+         self.locks = LockStore(db)
+         self.tests = TestMessageStore(db)
+ 
+diff --git a/store/misc.py b/store/misc.py
+index 5861ada..25af568 100644
+--- a/store/misc.py
++++ b/store/misc.py
+@@ -112,6 +112,52 @@ class ScoringStore:
+             self.db.execute("DELETE FROM manual_matrix WHERE sniper = ? AND victim = ?", (sniper, victim))
+ 
+ 
++class HumanStore:
++    """The matrix + per-person adjustments a human produced by reading the whole
++    chat log. It is the reference the Compare tab holds the bot against; it never
++    feeds the live leaderboard (only the Manual matrix / Adjustments do that)."""
++
++    META_KEY = "human_truth_meta"
++
++    def __init__(self, db: Database):
++        self.db = db
++
++    def matrix(self) -> dict:
++        out: dict = {}
++        for r in self.db.query("SELECT * FROM human_matrix"):
++            out.setdefault(r["sniper"], {})[r["victim"]] = r["value"]
++        return out
++
++    def set_cell(self, sniper: str, victim: str, value: int) -> None:
++        if value:
++            self.db.execute(
++                """INSERT INTO human_matrix (sniper, victim, value) VALUES (?,?,?)
++                   ON CONFLICT(sniper, victim) DO UPDATE SET value = excluded.value""",
++                (sniper, victim, value),
++            )
++        else:
++            self.db.execute("DELETE FROM human_matrix WHERE sniper = ? AND victim = ?", (sniper, victim))
++
++    def adjustments(self) -> dict:
++        return {r["user_id"]: r["value"] for r in self.db.query("SELECT * FROM human_adjustments")}
++
++    def set_adjustment(self, user_id: str, value: float) -> None:
++        if value:
++            self.db.execute(
++                "INSERT INTO human_adjustments (user_id, value) VALUES (?, ?) "
++                "ON CONFLICT(user_id) DO UPDATE SET value = excluded.value", (user_id, value))
++        else:
++            self.db.execute("DELETE FROM human_adjustments WHERE user_id = ?", (user_id,))
++
++    def replace_matrix(self, cells: dict) -> None:
++        """Swap the whole human matrix for `cells` ({sniper: {victim: n}}) in one transaction."""
++        with self.db.tx():
++            self.db.execute("DELETE FROM human_matrix")
++            self.db.executemany(
++                "INSERT INTO human_matrix (sniper, victim, value) VALUES (?,?,?)",
++                [(s, v, n) for s, row in cells.items() for v, n in row.items() if n])
++
++
+ class Names(dict):
+     """user id -> display name, plus which names are shared by more than one person
+     (so they can be told apart instead of showing two identical labels)."""
+diff --git a/tests/frontend/smoke.mjs b/tests/frontend/smoke.mjs
+index 3cbe2e6..01e75ff 100644
+--- a/tests/frontend/smoke.mjs
++++ b/tests/frontend/smoke.mjs
+@@ -22,7 +22,7 @@ await import(process.env.JS_MAIN || '../../snipesbot/web/static/js/main.js');
+ await sleep(800);
+ 
+ // ---------------- every tab renders without error ----------------
+-for (const name of ['livelog', 'review', 'manual', 'special', 'search', 'dns', 'analysis', 'matrix', 'adjustments', 'maintenance']) {
++for (const name of ['livelog', 'review', 'manual', 'special', 'search', 'dns', 'analysis', 'matrix', 'compare', 'adjustments', 'maintenance']) {
+   const panel = await tab(name, 900);
+   const text = panel.textContent;
+   check(`tab "${name}" renders`, panel.classList.contains('active') && text.trim().length > 0 && !text.includes('Something went wrong'), text.slice(0, 120));
+@@ -159,6 +159,32 @@ const ai = $('.adj-input', adj); ai.value = '2.5'; ai.dispatchEvent(new window.E
+ check('adjustment saves', (await api('/adjustments')).users.some((u) => u.adjustment === 2.5));
+ const an = await tab('analysis', 900);
+ check('analysis shows the leaderboard', an.textContent.includes('Leaderboard') && an.textContent.includes('Rivalries'));
++check('analysis lists the current logic of every analysis', an.textContent.includes('How every analysis works') && an.textContent.includes('Retaliation speed') && an.textContent.includes('Score = Snipes'));
++
++// ---- matrix: the big number (Score) is editable live ----
++const mx = await tab('matrix', 900);
++$$('.matrix-subtab-btn', mx).find((b) => b.textContent === 'True').click(); await sleep(900);
++const si = $('.score-input', mx);
++check('true matrix has Adjustment and Score columns', !!si && !!$('.adj-input', mx));
++const uid = si.dataset.user;
++const rt = Number($$('[data-rt]', mx).find((c) => c.dataset.rt === uid).textContent), ct = Number($$('[data-ct]', mx).find((c) => c.dataset.ct === uid).textContent);
++si.value = '10'; si.dispatchEvent(new window.Event('change')); await sleep(900);
++check('typing a Score saves the adjustment that reaches it', (await api('/adjustments')).users.find((u) => u.id === uid).adjustment === 10 - (rt - ct), JSON.stringify((await api('/adjustments')).users.find((u) => u.id === uid)));
++const c1 = $$('.cell-input[data-sniper]', mx)[0]; const rtBefore = $$('[data-rt]', mx).find((c) => c.dataset.rt === c1.dataset.sniper).textContent;
++c1.value = String(Number(c1.value) + 7); c1.dispatchEvent(new window.Event('input'));
++check('editing a cell updates the totals live, before saving', $$('[data-rt]', mx).find((c) => c.dataset.rt === c1.dataset.sniper).textContent !== rtBefore);
++c1.dispatchEvent(new window.Event('change')); await sleep(700);
++
++// ---- compare: human truth vs bot, and its remedy ----
++const trueM = await api('/matrix/true');
++const hs = trueM.users[0].id, hv = trueM.users[1].id;
++await fetch(BASE + '/api/compare/human/cell', { method: 'POST', headers: { 'X-Requested-With': 'snipesbot', 'Content-Type': 'application/json' }, body: JSON.stringify({ sniper: hs, victim: hv, value: 9 }) });
++const cp = await tab('compare', 1200);
++check('compare tab lists the discrepancy with an Apply button', cp.textContent.includes('Discrepancies') && !!$('[data-fix]', cp), cp.textContent.slice(0, 200));
++$('[data-fix]', cp).click(); await sleep(1200);
++check('applying the remedy makes True equal the human', ((await api('/matrix/true')).cells[hs] || {})[hv] === 9);
++$$('.matrix-subtab-btn', cp).find((b) => b.textContent.startsWith('Human')).click(); await sleep(300);
++check('human matrix grid is editable', $$('.cell-input[data-s]', cp).length > 0);
+ 
+ // ---------------- Maintenance ----------------
+ const m = await tab('maintenance', 900);
+diff --git a/tests/test_compare_roster.py b/tests/test_compare_roster.py
+new file mode 100644
+index 0000000..10521d3
+--- /dev/null
++++ b/tests/test_compare_roster.py
+@@ -0,0 +1,98 @@
++"""Roster (no whole-workspace names) and the Compare tab."""
++import pytest
++
++from snipesbot.models import Kind
++from snipesbot.services import roster
++from snipesbot.web import create_app
++from conftest import ALICE, BOB, CAROL, CHANNEL
++from test_web import add, H
++
++
++@pytest.fixture
++def client(env, no_download):
++    app = create_app(env)
++    app.testing = True
++    return app.test_client()
++
++
++def ids(client, view="true"):
++    return {u["id"] for u in client.get(f"/api/matrix/{view}").get_json()["users"]}
++
++
++def test_matrices_ignore_workspace_wide_directory_names(env, client):
++    env.store.names.set_many({f"UOTHER{i:04d}": f"Stranger {i}" for i in range(300)})
++    env.store.names.set_many({ALICE: "Alice", CAROL: "Carol"})
++    add(env, 1, "", kind=Kind.SNIPE)                         # CAROL -> ALICE
++    got = ids(client)
++    assert got == {ALICE, CAROL}
++    assert {u["id"] for u in client.get("/api/adjustments").get_json()["users"]} == {ALICE, CAROL}
++
++
++def test_roster_has_mentioned_posters_members_and_dns(env):
++    from conftest import photo_msg
++    from snipesbot.services import archiver
++    archiver.archive_message(env, photo_msg("1788000000.000100", CAROL, f"<@{BOB}> snipe"))
++    env.store.dns.add("UDNS00001")
++    env.store.settings.set(roster.MEMBERS_KEY, ["UMEMBER01"])
++    got = roster.participants(env)
++    assert {CAROL, BOB, "UDNS00001", "UMEMBER01"} <= got
++    assert "UOTHER0001" not in got
++
++
++def test_manual_edit_keeps_person_on_roster(env, client):
++    client.post("/api/matrix/manual/cell", json={"sniper": "UEDITED01", "victim": BOB, "value": 2}, headers=H)
++    assert "UEDITED01" in ids(client)
++
++
++def test_compare_finds_overcount_and_missed_and_remedy_fixes_true(env, client):
++    add(env, 1, "", kind=Kind.SNIPE)                         # bot: CAROL -> ALICE = 1
++    add(env, 2, "", kind=Kind.SNIPE)                         # bot: CAROL -> ALICE = 2
++    # human says CAROL->ALICE is 1, and ALICE->BOB is 3 (bot has none)
++    client.post("/api/compare/human/cell", json={"sniper": CAROL, "victim": ALICE, "value": 1}, headers=H)
++    client.post("/api/compare/human/cell", json={"sniper": ALICE, "victim": BOB, "value": 3}, headers=H)
++    d = client.get("/api/compare").get_json()
++    by = {(x["sniper"], x["victim"]): x for x in d["discrepancies"]}
++    over, missed = by[(CAROL, ALICE)], by[(ALICE, BOB)]
++    assert (over["bot"], over["human"], over["diff"], over["remedy"]) == (2, 1, -1, -1)
++    assert len(over["suspects"]) == 2                        # the bot's own snipes for that pair
++    assert (missed["bot"], missed["human"], missed["diff"]) == (0, 3, 3)
++    assert d["summary"]["bot_missed"] == 3 and d["summary"]["bot_overcounted"] == 1
++
++    client.post("/api/compare/remedy/cell", json={"sniper": CAROL, "victim": ALICE}, headers=H)
++    assert env.store.scoring.matrix() == {CAROL: {ALICE: -1}}
++    r = client.post("/api/compare/remedy/all", headers=H).get_json()
++    assert r["ok"] and client.get("/api/matrix/true").get_json()["cells"] == {CAROL: {ALICE: 1}, ALICE: {BOB: 3}}
++    again = client.get("/api/compare").get_json()
++    assert all(x["resolved"] for x in again["discrepancies"] if x["diff"])
++
++
++def test_human_adjustment_and_score_gap_and_remedy(env, client):
++    add(env, 1, "", kind=Kind.SNIPE)
++    client.post("/api/compare/human/cell", json={"sniper": CAROL, "victim": ALICE, "value": 1}, headers=H)
++    client.post("/api/compare/human/adjustment", json={"user_id": CAROL, "adjustment": 2.5}, headers=H)
++    p = {x["id"]: x for x in client.get("/api/compare").get_json()["persons"]}[CAROL]
++    assert p["human"]["score"] == 3.5 and p["bot"]["score"] == 1 and p["gap"]["adjustment"] == 2.5
++    client.post("/api/compare/remedy/adjustment", json={"user_id": CAROL}, headers=H)
++    assert env.store.scoring.adjustments() == {CAROL: 2.5}
++
++
++def test_import_matches_names_and_rejects_unknown(env, client):
++    env.store.names.set_many({ALICE: "Alice", BOB: "Bob", CAROL: "Carol"})
++    add(env, 1, "", kind=Kind.SNIPE)                         # puts Carol + Alice on the roster
++    env.store.dns.add(BOB)
++    ok = client.post("/api/compare/human/import", json={"text": "\tAlice\tBob\nCarol\t4\t1\n"}, headers=H)
++    assert ok.status_code == 200
++    assert env.store.human.matrix() == {CAROL: {ALICE: 4, BOB: 1}}
++    bad = client.post("/api/compare/human/import", json={"text": "\tNobody\nCarol\t1\n"}, headers=H)
++    assert bad.status_code == 400 and "Nobody" in bad.get_json()["error"]
++    assert env.store.human.matrix() == {CAROL: {ALICE: 4, BOB: 1}}      # nothing saved on failure
++
++
++def test_remedy_all_skips_do_not_snipe_victims(env, client):
++    add(env, 1, "", kind=Kind.SNIPE)
++    env.store.dns.add(ALICE)                                 # bot scores nothing for CAROL -> ALICE
++    client.post("/api/compare/human/cell", json={"sniper": CAROL, "victim": ALICE, "value": 1}, headers=H)
++    r = client.post("/api/compare/remedy/all", headers=H).get_json()
++    assert r["dns_skipped"] == 1 and env.store.scoring.matrix() == {}
++    d = client.get("/api/compare").get_json()["discrepancies"][0]
++    assert d["dns"] is True
+diff --git a/web/__init__.py b/web/__init__.py
+index a266407..9de9c9a 100644
+--- a/web/__init__.py
++++ b/web/__init__.py
+@@ -10,7 +10,7 @@ from ..services.entries import EntryNotFound, InvalidTransition
+ from ..services.maintenance import JobRunner
+ from ..store import Busy
+ from . import auth
+-from .api import entries, people, scoring, system
++from .api import compare, entries, people, scoring, system
+ 
+ 
+ def create_app(env: Env) -> Flask:
+@@ -19,7 +19,7 @@ def create_app(env: Env) -> Flask:
+     app.config["RUNNER"] = JobRunner(env)
+     auth.install(app, env.cfg)
+ 
+-    for module in (entries, people, scoring, system):
++    for module in (compare, entries, people, scoring, system):
+         app.register_blueprint(module.bp, url_prefix="/api")
+ 
+     @app.teardown_request
+diff --git a/web/api/compare.py b/web/api/compare.py
+new file mode 100644
+index 0000000..860782c
+--- /dev/null
++++ b/web/api/compare.py
+@@ -0,0 +1,183 @@
++"""Compare tab: the human's matrix vs the bot, and applying the fixes."""
++from __future__ import annotations
++
++import csv
++import io
++
++from flask import Blueprint, jsonify, request
++
++from ...analysis.compare import compare
++from ...analysis.stats import Stats
++from ...services import people, roster
++from ..deps import env
++
++bp = Blueprint("compare", __name__)
++
++
++def _human_users(stats: Stats) -> list:
++    s = env().store
++    h, adj = s.human.matrix(), s.human.adjustments()
++    extra = set(h) | {v for r in h.values() for v in r} | set(adj)
++    users = roster.roster_ids(env(), stats.coded_matrix()["users"], stats.true_matrix()["users"], extra)
++    people.ensure_names(env(), users, limit=40)
++    names = env().store.names.all()
++    return sorted(users, key=lambda u: (people.display(u, names) or u).lower())
++
++
++@bp.get("/compare")
++def get_compare():
++    stats = Stats(env())
++    s = env().store
++    order = _human_users(stats)
++    names = s.names.all()
++    h, adj = s.human.matrix(), s.human.adjustments()
++    out = compare(stats, h, adj, names)
++    out["users"] = [{"id": u, "display": people.display(u, names)} for u in order]
++    out["human_cells"], out["human_adjustments"] = h, adj
++    out["meta"] = s.settings.get(s.human.META_KEY) or {"as_of": "", "note": ""}
++    return jsonify(out)
++
++
++def _int(body, key="value"):
++    try:
++        return int(body.get(key, 0) or 0), None
++    except (TypeError, ValueError):
++        return None, (jsonify({"error": "value must be a whole number"}), 400)
++
++
++@bp.post("/compare/human/cell")
++def set_human_cell():
++    body = request.get_json(silent=True) or {}
++    sniper, victim = (body.get("sniper") or "").strip(), (body.get("victim") or "").strip()
++    value, err = _int(body)
++    if err:
++        return err
++    if not sniper or not victim or sniper == victim:
++        return jsonify({"error": "sniper and victim (and they must differ) are required"}), 400
++    env().store.human.set_cell(sniper, victim, value)
++    return jsonify({"ok": True})
++
++
++@bp.post("/compare/human/adjustment")
++def set_human_adjustment():
++    body = request.get_json(silent=True) or {}
++    user_id = (body.get("user_id") or "").strip()
++    if not user_id:
++        return jsonify({"error": "user_id required"}), 400
++    try:
++        value = float(body.get("adjustment", 0) or 0)
++    except (TypeError, ValueError):
++        return jsonify({"error": "adjustment must be a number"}), 400
++    env().store.human.set_adjustment(user_id, value)
++    return jsonify({"ok": True})
++
++
++@bp.post("/compare/human/meta")
++def set_meta():
++    body = request.get_json(silent=True) or {}
++    s = env().store
++    s.settings.set(s.human.META_KEY, {"as_of": str(body.get("as_of") or "")[:40], "note": str(body.get("note") or "")[:2000]})
++    return jsonify({"ok": True})
++
++
++@bp.post("/compare/human/import")
++def import_matrix():
++    """Paste a matrix copied from a spreadsheet: first row = victim names, first
++    column = sniper names (tab, comma or semicolon separated). Names are matched
++    to the roster; anything unmatched is reported and nothing is saved."""
++    body = request.get_json(silent=True) or {}
++    text = (body.get("text") or "").strip("\n")
++    if not text.strip():
++        return jsonify({"error": "nothing to import"}), 400
++    first = text.splitlines()[0]
++    delim = "\t" if "\t" in first else (";" if first.count(";") > first.count(",") else ",")
++    rows = list(csv.reader(io.StringIO(text), delimiter=delim))
++    stats = Stats(env())
++    names = env().store.names.all()
++    by_name: dict = {}
++    for u in _human_users(stats):
++        by_name.setdefault((people.display(u, names) or "").strip().lower(), u)
++        by_name.setdefault((names.get(u) or "").strip().lower(), u)
++    lookup = lambda n: by_name.get(n.strip().lstrip("@").lower())      # noqa: E731
++    header = rows[0][1:]
++    cols = [lookup(h) for h in header]
++    unmatched = sorted({h.strip() for h, c in zip(header, cols) if h.strip() and not c})
++    cells: dict = {}
++    for r in rows[1:]:
++        if not r or not r[0].strip():
++            continue
++        sniper = lookup(r[0])
++        if not sniper:
++            unmatched.append(r[0].strip())
++            continue
++        for victim, raw in zip(cols, r[1:]):
++            raw = raw.strip()
++            if not raw or not victim or victim == sniper:
++                continue
++            try:
++                n = int(float(raw))
++            except ValueError:
++                continue
++            if n:
++                cells.setdefault(sniper, {})[victim] = n
++    if unmatched:
++        return jsonify({"error": "Couldn't match these names to anyone on the roster: " + ", ".join(sorted(set(unmatched)))}), 400
++    env().store.human.replace_matrix(cells)
++    return jsonify({"ok": True, "cells": sum(len(r) for r in cells.values())})
++
++
++# ---- remedies: write the fix into the Manual matrix / Adjustments --------------------------------------
++
++def _apply_cell(stats: Stats, sniper: str, victim: str) -> int:
++    h = env().store.human.matrix().get(sniper, {}).get(victim, 0)
++    coded = stats.coded_matrix()["cells"].get(sniper, {}).get(victim, 0)
++    env().store.scoring.set_cell(sniper, victim, h - coded)
++    return h - coded
++
++
++@bp.post("/compare/remedy/cell")
++def remedy_cell():
++    body = request.get_json(silent=True) or {}
++    sniper, victim = (body.get("sniper") or "").strip(), (body.get("victim") or "").strip()
++    if not sniper or not victim or sniper == victim:
++        return jsonify({"error": "sniper and victim (and they must differ) are required"}), 400
++    return jsonify({"ok": True, "manual": _apply_cell(Stats(env()), sniper, victim)})
++
++
++@bp.post("/compare/remedy/adjustment")
++def remedy_adjustment():
++    user_id = ((request.get_json(silent=True) or {}).get("user_id") or "").strip()
++    if not user_id:
++        return jsonify({"error": "user_id required"}), 400
++    env().store.scoring.set_adjustment(user_id, env().store.human.adjustments().get(user_id, 0))
++    return jsonify({"ok": True})
++
++
++@bp.post("/compare/remedy/all")
++def remedy_all():
++    """Make True match the human everywhere, except cells whose victim is on the
++    do-not-snipe list (those intentionally score nothing; the human decides by hand)."""
++    stats = Stats(env())
++    s = env().store
++    h, manual, adj_now = s.human.matrix(), s.scoring.matrix(), s.scoring.adjustments()
++    coded = stats.coded_matrix()["cells"]
++    users = set(h) | {v for r in h.values() for v in r} | set(manual) | {v for r in manual.values() for v in r}
++    users |= set(coded) | {v for r in coded.values() for v in r}
++    fixed = skipped = 0
++    for a in users:
++        for b in users:
++            if a == b:
++                continue
++            want, have = h.get(a, {}).get(b, 0), coded.get(a, {}).get(b, 0)
++            if b in stats.dns and want != have:
++                skipped += 1
++                continue
++            if manual.get(a, {}).get(b, 0) != want - have:
++                s.scoring.set_cell(a, b, want - have)
++                fixed += 1
++    human_adj, adj_fixed = s.human.adjustments(), 0
++    for u in set(human_adj) | set(adj_now):
++        if (adj_now.get(u, 0) or 0) != human_adj.get(u, 0):
++            s.scoring.set_adjustment(u, human_adj.get(u, 0))
++            adj_fixed += 1
++    return jsonify({"ok": True, "cells_fixed": fixed, "adjustments_fixed": adj_fixed, "dns_skipped": skipped})
+diff --git a/web/api/scoring.py b/web/api/scoring.py
+index 306ba9a..4a6c839 100644
+--- a/web/api/scoring.py
++++ b/web/api/scoring.py
+@@ -3,8 +3,9 @@ from __future__ import annotations
+ 
+ from flask import Blueprint, jsonify, request
+ 
++from ...analysis import logic
+ from ...analysis.stats import Stats
+-from ...services import people
++from ...services import people, roster
+ from ..deps import env
+ 
+ bp = Blueprint("scoring", __name__)
+@@ -15,11 +16,12 @@ def _names_for(user_ids) -> dict:
+     return env().store.names.all()
+ 
+ 
+-def _roster(stats: Stats) -> list:
+-    """Everyone with a name, in the matrices, or with an adjustment -- ordered by
+-    True row total then name, so all matrix views and the Adjustments tab line up."""
++def _roster(stats: Stats, *extra) -> list:
++    """The snipes-channel roster only (people @ed there, people in it, do-not-snipe
++    people, and anyone with a manual number) -- NOT the whole Slack workspace.
++    Ordered by True row total then name so every matrix view lines up."""
+     true = stats.true_matrix()
+-    users = set(env().store.names.all()) | set(stats.coded_matrix()["users"]) | set(true["users"]) | set(stats.adjustments)
++    users = roster.roster_ids(env(), stats.coded_matrix()["users"], true["users"], stats.adjustments, *extra)
+     names = _names_for(users)
+     return sorted(users, key=lambda u: (-true["row_totals"].get(u, 0), (names.get(u) or u).lower()))
+ 
+@@ -31,6 +33,7 @@ def _matrix_json(stats, order, row_totals, col_totals, cells, editable):
+         "row_totals": {u: row_totals.get(u, 0) for u in order},
+         "col_totals": {u: col_totals.get(u, 0) for u in order},
+         "cells": cells, "editable": editable,
++        "adjustments": {u: stats.adjustments.get(u, 0) for u in order},
+     })
+ 
+ 
+@@ -137,3 +140,9 @@ def analysis():
+         "group_snipe_as_sniper": named(as_sniper), "group_snipe_as_victim": named(as_victim),
+         "queue_size": stats.pending_count,
+     })
++
++
++@bp.get("/analysis/logic")
++def analysis_logic():
++    """The plain-words logic behind every analysis (single source: analysis/logic.py)."""
++    return jsonify(logic.describe())
+diff --git a/web/static/js/main.js b/web/static/js/main.js
+index d0cb5ba..a3bac40 100644
+--- a/web/static/js/main.js
++++ b/web/static/js/main.js
+@@ -11,6 +11,7 @@ const TABS = {
+   dns: () => import('./tabs/dns.js'),
+   analysis: () => import('./tabs/analysis.js'),
+   matrix: () => import('./tabs/matrix.js'),
++  compare: () => import('./tabs/compare.js'),
+   adjustments: () => import('./tabs/adjustments.js'),
+   maintenance: () => import('./tabs/maintenance.js'),
+ };
+diff --git a/web/static/js/tabs/analysis.js b/web/static/js/tabs/analysis.js
+index 9e1b979..83e94e6 100644
+--- a/web/static/js/tabs/analysis.js
++++ b/web/static/js/tabs/analysis.js
+@@ -3,12 +3,8 @@ import { el, html, render } from '../dom.js';
+ 
+ const fmt = (v) => (typeof v === 'number' ? v.toFixed(2).replace(/\.00$/, '') : v);
+ 
+-const dictTable = (title, obj) => html`
+-  <div class="stat-block"><h3>${title}</h3><table><tbody>
+-    ${Object.keys(obj).length
+-      ? Object.entries(obj).map(([k, v]) => html`<tr><td>${k}</td><td>${fmt(v)}</td></tr>`)
+-      : html`<tr><td colspan="2">—</td></tr>`}
+-  </tbody></table></div>`;
++/** Highest value first; ties by name so the order never jumps around. */
++const desc = (obj) => Object.entries(obj).sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])));
+ 
+ export function mount(panel) {
+   const run = el('button', { type: 'button', class: 'btn', text: 'Run fresh analysis' });
+@@ -17,30 +13,44 @@ export function mount(panel) {
+ 
+   async function load() {
+     render(body, 'Loading…');
+-    const d = await api('/analysis');
++    const [d, logic] = await Promise.all([api('/analysis'), api('/analysis/logic')]);
++    const order = Object.fromEntries(logic.analyses.map((a) => [a.key, a.order]));
++    const dictTable = (title, key, obj) => html`
++      <div class="stat-block"><h3>${title}</h3><div class="caption">${order[key] || ''}</div><table><tbody>
++        ${Object.keys(obj).length
++          ? desc(obj).map(([k, v], i) => html`<tr><td>${i + 1}</td><td>${k}</td><td>${fmt(v)}</td></tr>`)
++          : html`<tr><td colspan="3">—</td></tr>`}
++      </tbody></table></div>`;
++
+     render(body, html`
+-      <div class="stat-block"><h3>Leaderboard</h3>
++      <details class="logic" open><summary>How every analysis works (current logic)</summary>
++        <h4>How a photo is judged</h4><ul>${logic.classification.map((t) => html`<li>${t}</li>`)}</ul>
++        <h4>How scoring works</h4><ul>${logic.scoring.map((t) => html`<li>${t}</li>`)}</ul>
++        <h4>Each analysis</h4>
++        <ul>${logic.analyses.map((a) => html`<li><b>${a.title}</b> <span class="order">· ${a.order}</span><br>${a.logic}</li>`)}</ul>
++      </details>
++      <div class="stat-block"><h3>Leaderboard</h3><div class="caption">${order.leaderboard}</div>
+         <table><thead><tr><th>Rank</th><th>User</th><th>Snipes</th><th>Sniped</th><th>Adjustment</th><th>Score</th></tr></thead>
+         <tbody>${d.leaderboard.length
+           ? d.leaderboard.map((r) => html`<tr><td>${r.rank}</td><td>${r.user}</td><td>${r.snipes}</td><td>${r.sniped}</td><td>${fmt(r.adjustment)}</td><td>${fmt(r.score)}</td></tr>`)
+           : html`<tr><td colspan="6">No confirmed snipes yet</td></tr>`}</tbody></table></div>
+-      <div class="stat-block"><h3>Rivalries</h3><table><tbody>
+-        ${d.rivalries.length ? d.rivalries.map((r) => html`<tr><td>${r.pair.join(' vs ')}</td><td>${r.count}</td></tr>`) : html`<tr><td colspan="2">—</td></tr>`}
++      <div class="stat-block"><h3>Rivalries</h3><div class="caption">${order.rivalries}</div><table><tbody>
++        ${d.rivalries.length ? d.rivalries.map((r, i) => html`<tr><td>${i + 1}</td><td>${r.pair.join(' vs ')}</td><td>${r.count}</td></tr>`) : html`<tr><td colspan="3">—</td></tr>`}
+       </tbody></table></div>
+-      <div class="stat-block"><h3>No-points snipes (target is on the do-not-snipe list)</h3>
++      <div class="stat-block"><h3>No-points snipes (target is on the do-not-snipe list)</h3><div class="caption">${order.no_points}</div>
+         <p class="caption">${d.no_points.total} snipe(s) logged but not scored — neither the sniper nor the target earns points.</p>
+         <table><tbody>${d.no_points.recent.length
+           ? d.no_points.recent.map((r) => html`<tr><td>${r.date}</td><td>${r.sniper}</td><td>→ ${r.victims.join(', ')}</td></tr>`)
+           : html`<tr><td colspan="3">None</td></tr>`}</tbody></table></div>
+-      ${dictTable('No-points snipes by sniper', d.no_points.by_sniper)}
+-      ${dictTable('Sniping streaks (days)', d.streaks)}
+-      ${dictTable('Untouchable (days since last sniped)', d.untouchable)}
+-      ${dictTable('Retaliation speed (avg hrs)', d.retaliation_speed)}
+-      ${dictTable('Peak days', d.peak_by_day)}
+-      ${dictTable('Peak time of day', d.peak_by_bucket)}
+-      ${dictTable('Notable ratio', d.notable_ratio)}
+-      ${dictTable('Group snipes — as sniper', d.group_snipe_as_sniper)}
+-      ${dictTable('Group snipes — as victim', d.group_snipe_as_victim)}
++      ${dictTable('No-points snipes by sniper', 'no_points', d.no_points.by_sniper)}
++      ${dictTable('Sniping streaks (days)', 'streaks', d.streaks)}
++      ${dictTable('Untouchable (days since last sniped)', 'untouchable', d.untouchable)}
++      ${dictTable('Retaliation speed (avg hrs)', 'retaliation_speed', d.retaliation_speed)}
++      ${dictTable('Peak days', 'peak_by_day', d.peak_by_day)}
++      ${dictTable('Peak time of day', 'peak_by_bucket', d.peak_by_bucket)}
++      ${dictTable('Notable ratio', 'notable_ratio', d.notable_ratio)}
++      ${dictTable('Group snipes — as sniper', 'group_snipe_as_sniper', d.group_snipe_as_sniper)}
++      ${dictTable('Group snipes — as victim', 'group_snipe_as_victim', d.group_snipe_as_victim)}
+       <div class="stat-block"><h3>Review queue size (needs a decision)</h3>${d.queue_size}</div>`);
+   }
+   run.addEventListener('click', load);
+diff --git a/web/static/js/tabs/compare.js b/web/static/js/tabs/compare.js
+new file mode 100644
+index 0000000..827cbc5
+--- /dev/null
++++ b/web/static/js/tabs/compare.js
+@@ -0,0 +1,152 @@
++import { api } from '../api.js';
++import { $, $$, el, empty, html, render } from '../dom.js';
++
++const SUBS = [['diff', 'Discrepancies'], ['people', 'By person'], ['human', 'Human matrix (edit)'], ['import', 'Paste / notes']];
++const sign = (n) => (n > 0 ? `+${n}` : String(n));
++const cls = (n) => (n > 0 ? 'diff-pos' : n < 0 ? 'diff-neg' : 'diff-zero');
++const r2 = (n) => Math.round(n * 100) / 100;
++const find = (root, sel, attr, id) => $$(sel, root).find((n) => n.dataset[attr] === id);
++
++export function mount(panel) {
++  let sub = 'diff', data = null, showResolved = false;
++  const btns = SUBS.map(([k, label]) => el('button', {
++    type: 'button', class: 'matrix-subtab-btn' + (k === sub ? ' active' : ''), text: label,
++    onclick: () => { sub = k; btns.forEach((b, i) => b.classList.toggle('active', SUBS[i][0] === k)); paint(); },
++  }));
++  const refresh = el('button', { type: 'button', class: 'btn', text: 'Refresh', onclick: () => load() });
++  const applyAll = el('button', { type: 'button', class: 'btn primary', text: 'Make True match Human (all)', onclick: async () => {
++    if (!confirm('Write Manual-matrix corrections and Adjustments so the True numbers equal the Human numbers everywhere? (Cells aimed at do-not-snipe people are skipped.)')) return;
++    const r = await api('/compare/remedy/all', { method: 'POST', body: {} });
++    alert(`Fixed ${r.cells_fixed} cell(s) and ${r.adjustments_fixed} adjustment(s).` + (r.dns_skipped ? ` Skipped ${r.dns_skipped} do-not-snipe cell(s) — decide those by hand.` : ''));
++    load();
++  } });
++  const summary = el('div');
++  const body = el('div', { style: 'margin-top:10px' });
++  panel.append(el('div', { class: 'review-controls' }, el('div', { class: 'matrix-subtabs' }, ...btns), refresh, applyAll), summary, body);
++
++  async function load() { render(body, 'Loading…'); data = await api('/compare'); paint(); }
++
++  function paint() {
++    const s = data.summary;
++    const pill = (label, v, kind = '') => html`<div class="cmp-pill ${kind}">${label}<b>${v}</b></div>`;
++    render(summary, html`<div class="cmp-summary">
++      ${pill('Human total', s.human_total)}${pill('Bot total', s.bot_total)}${pill('True total (bot + manual)', s.true_total)}
++      ${pill('Bot missed', s.bot_missed, s.bot_missed ? 'bad' : 'good')}${pill('Bot over-counted', s.bot_overcounted, s.bot_overcounted ? 'bad' : 'good')}
++      ${pill('Cells still wrong in True', s.cells_still_wrong, s.cells_still_wrong ? 'bad' : 'good')}
++      ${pill('People with a score gap', s.people_score_gap, s.people_score_gap ? 'bad' : 'good')}</div>
++      ${data.meta.as_of || data.meta.note ? html`<div class="cmp-note">Human truth as of <b>${data.meta.as_of || '—'}</b>. ${data.meta.note}</div>` : ''}`);
++    ({ diff: paintDiff, people: paintPeople, human: paintHuman, import: paintImport })[sub]();
++  }
++
++  function paintDiff() {
++    const rows = data.discrepancies.filter((d) => showResolved || !d.resolved);
++    if (!Object.keys(data.human_cells).length) {
++      render(body, empty('No human matrix yet. Enter it in “Human matrix (edit)” or paste it in “Paste / notes”, and every difference from the bot appears here.')); return;
++    }
++    const toggle = el('label', { class: 'cmp-note' }, el('input', { type: 'checkbox', ...(showResolved ? { checked: '' } : {}), onchange: (e) => { showResolved = e.target.checked; paint(); } }), ' show cells already fixed');
++    const table = html`<table class="cmp-table"><thead><tr><th>Sniper → Victim</th><th class="num">Human</th><th class="num">Bot</th><th class="num">Diff</th>
++        <th class="num">Manual now</th><th class="num">True now</th><th>What to check</th><th></th></tr></thead><tbody>
++      ${rows.length ? rows.map((d, i) => html`<tr class="${d.resolved ? 'resolved' : ''}">
++        <td><b>${d.sniper_name}</b> → ${d.victim_name}${d.dns ? html` <span title="Victim is on the do-not-snipe list: the bot scores nothing for this pair">🛡️ DNS</span>` : ''}</td>
++        <td class="num">${d.human}</td><td class="num">${d.bot}</td><td class="num ${cls(d.diff)}">${sign(d.diff)}</td>
++        <td class="num">${d.manual}</td><td class="num ${cls(d.gap)}">${d.true}${d.gap ? ` (${sign(d.gap)} off)` : ' ✓'}</td>
++        <td>${d.resolved ? 'Fixed by a manual correction' : d.diff < 0 ? 'Bot over-counted — one of its snipes for this pair is probably wrong:' : 'Bot missed — these photos weren’t counted:'}
++          ${d.suspects.map((e) => html`<div class="cmp-suspect"><span class="k">${e.kind}</span> ${e.date} · ${e.sniper}${e.sniped.length ? ' → ' + e.sniped.join(', ') : ''} — ${e.caption || '(no caption)'}</div>`)}
++          ${!d.resolved && !d.suspects.length ? html`<div class="cmp-suspect">No matching photos found — the human may have counted something that isn’t in the log.</div>` : ''}</td>
++        <td>${d.resolved ? '' : html`<button type="button" class="btn" data-fix="${i}" title="Set Manual to ${d.remedy}">Apply ${sign(d.remedy)}</button>`}</td></tr>`)
++        : html`<tr><td colspan="8">Nothing to fix — True matches the human everywhere. 🎉</td></tr>`}
++      </tbody></table>`;
++    render(body, html`<div class="cmp-note">Diff = Human − Bot: positive means the bot missed snipes, negative means it over-counted. “Apply” stores the Manual correction (Human − Bot) so True equals Human.</div>`);
++    body.append(toggle, el('div', { class: 'matrix-scroll' }));
++    render(body.lastChild, table);
++    $$('[data-fix]', body).forEach((b) => b.addEventListener('click', async () => {
++      const d = rows[Number(b.dataset.fix)];
++      await api('/compare/remedy/cell', { method: 'POST', body: { sniper: d.sniper, victim: d.victim } });
++      load();
++    }));
++  }
++
++  function paintPeople() {
++    const fix = (p) => p.gap.adjustment !== 0;
++    const cell = (o) => html`<td class="num">${o.snipes}</td><td class="num">${o.sniped}</td><td class="num">${r2(o.adjustment)}</td><td class="num"><b>${r2(o.score)}</b></td>`;
++    render(body, html`<div class="cmp-note">Score = Snipes − Sniped + Adjustment. “Bot” is the untouched bot count (no adjustments). “True” is what is scoring today.</div>
++      <div class="matrix-scroll"><table class="cmp-table"><thead><tr><th rowspan="2">Person</th><th colspan="4">Human</th><th colspan="4">Bot</th><th colspan="4">True (today)</th><th colspan="2">Human − Bot / True</th><th rowspan="2"></th></tr>
++        <tr>${['Snipes', 'Sniped', 'Adj', 'Score'].map((h) => html`<th class="num">${h}</th>`)}${['Snipes', 'Sniped', 'Adj', 'Score'].map((h) => html`<th class="num">${h}</th>`)}${['Snipes', 'Sniped', 'Adj', 'Score'].map((h) => html`<th class="num">${h}</th>`)}<th class="num">vs Bot</th><th class="num">vs True</th></tr></thead>
++      <tbody>${data.persons.map((p) => html`<tr><td><b>${p.name}</b></td>${cell(p.human)}${cell(p.bot)}${cell(p.true)}
++        <td class="num ${cls(p.diff.score)}">${sign(r2(p.diff.score))}</td><td class="num ${cls(p.gap.score)}">${sign(r2(p.gap.score))}</td>
++        <td>${fix(p) ? html`<button type="button" class="btn" data-adj="${p.id}">Apply adj ${r2(p.human.adjustment)}</button>` : ''}</td></tr>`)}</tbody></table></div>`);
++    $$('[data-adj]', body).forEach((b) => b.addEventListener('click', async () => {
++      await api('/compare/remedy/adjustment', { method: 'POST', body: { user_id: b.dataset.adj } }); load();
++    }));
++  }
++
++  function paintHuman() {
++    const users = data.users, cells = data.human_cells, adj = data.human_adjustments;
++    const tot = {};
++    render(body, html`<div class="cmp-note">The human’s matrix: type the numbers from the full read-through. Saves as you go; Discrepancies updates when you switch tabs. Adjustment is the human’s per-person adjustment.</div>
++      <div class="matrix-scroll"><table class="matrix-table"><thead><tr><th>Sniper \\ Victim</th><th>Snipes</th>${users.map((u) => html`<th>${u.display}</th>`)}<th>Sniped</th><th>Adjustment</th><th>Score</th></tr></thead>
++      <tbody>${users.map((r) => html`<tr><td>${r.display}</td><td class="row-total" data-rt="${r.id}">0</td>
++        ${users.map((c) => r.id === c.id ? html`<td></td>` : html`<td><input type="text" inputmode="numeric" class="cell-input" data-s="${r.id}" data-v="${c.id}" value="${(cells[r.id] || {})[c.id] || 0}"></td>`)}
++        <td class="row-total" data-ct="${r.id}">0</td>
++        <td><input type="text" inputmode="decimal" class="cell-input adj-input" data-u="${r.id}" value="${adj[r.id] || 0}"></td>
++        <td class="row-total" data-sc="${r.id}">0</td></tr>`)}</tbody></table></div>`);
++    const recalc = () => {
++      const rows = {}, cols = {};
++      $$('.cell-input[data-s]', body).forEach((i) => { const n = Number(i.value) || 0; rows[i.dataset.s] = (rows[i.dataset.s] || 0) + n; cols[i.dataset.v] = (cols[i.dataset.v] || 0) + n; });
++      users.forEach((u) => {
++        const a = Number(find(body, '.adj-input', 'u', u.id).value) || 0;
++        find(body, '[data-rt]', 'rt', u.id).textContent = rows[u.id] || 0;
++        find(body, '[data-ct]', 'ct', u.id).textContent = cols[u.id] || 0;
++        find(body, '[data-sc]', 'sc', u.id).textContent = r2((rows[u.id] || 0) - (cols[u.id] || 0) + a);
++      });
++    };
++    recalc();
++    $$('.cell-input[data-s]', body).forEach((input) => {
++      let last = input.value;
++      input.addEventListener('input', recalc);
++      input.addEventListener('change', async () => {
++        const value = parseInt(input.value, 10);
++        if (Number.isNaN(value)) { input.value = last; recalc(); return; }
++        input.disabled = true;
++        try { await api('/compare/human/cell', { method: 'POST', body: { sniper: input.dataset.s, victim: input.dataset.v, value } }); last = String(value);
++          (cells[input.dataset.s] ||= {})[input.dataset.v] = value; }
++        catch (err) { alert(`Couldn't save: ${err.message}`); }
++        input.value = last; input.disabled = false; recalc();
++      });
++    });
++    $$('.adj-input', body).forEach((input) => {
++      let last = input.value;
++      input.addEventListener('input', recalc);
++      input.addEventListener('change', async () => {
++        const value = parseFloat(input.value);
++        if (Number.isNaN(value)) { input.value = last; recalc(); return; }
++        input.disabled = true;
++        try { await api('/compare/human/adjustment', { method: 'POST', body: { user_id: input.dataset.u, adjustment: value } }); last = String(value); adj[input.dataset.u] = value; }
++        catch (err) { alert(`Couldn't save: ${err.message}`); }
++        input.value = last; input.disabled = false; recalc();
++      });
++    });
++  }
++
++  function paintImport() {
++    const text = el('textarea', { class: 'cmp-textarea', placeholder: 'Paste the human’s matrix from a spreadsheet:\n(blank)\tAlice\tBob\nCarol\t4\t1\nAlice\t0\t2' });
++    const go = el('button', { type: 'button', class: 'btn primary', text: 'Replace human matrix with this', onclick: async () => {
++      if (!text.value.trim()) return;
++      if (!confirm('Replace the whole human matrix with the pasted one?')) return;
++      try { const r = await api('/compare/human/import', { method: 'POST', body: { text: text.value } }); alert(`Imported ${r.cells} cell(s).`); text.value = ''; load(); }
++      catch (err) { alert(err.message); }
++    } });
++    const asOf = el('input', { type: 'text', class: 'cell-input', style: 'width:12em', placeholder: 'e.g. 2026-11-01', value: data.meta.as_of || '' });
++    const note = el('textarea', { class: 'cmp-textarea', style: 'min-height:60px', placeholder: 'Notes about this human pass (who did it, what range of the chat it covers)…' });
++    note.value = data.meta.note || '';
++    const save = el('button', { type: 'button', class: 'btn', text: 'Save notes', onclick: async () => {
++      await api('/compare/human/meta', { method: 'POST', body: { as_of: asOf.value, note: note.value } }); load();
++    } });
++    body.replaceChildren(
++      el('div', { class: 'cmp-note', text: 'First row = victim names, first column = sniper names; tab-, comma- or semicolon-separated. Names must match people on the roster. Nothing is saved if any name doesn’t match.' }),
++      text, go,
++      el('h3', { text: 'When was this human pass made?', style: 'margin-top:20px' }), asOf, note, save);
++  }
++
++  return { activate: load };
++}
+diff --git a/web/static/js/tabs/matrix.js b/web/static/js/tabs/matrix.js
+index 1bae03a..2d3d29e 100644
+--- a/web/static/js/tabs/matrix.js
++++ b/web/static/js/tabs/matrix.js
+@@ -1,17 +1,22 @@
+ import { api } from '../api.js';
+-import { $$, el, empty, html, render } from '../dom.js';
++import { $, $$, el, empty, html, render } from '../dom.js';
+ 
+ const CAPTIONS = {
+   coded: 'Read-only — exactly what the bot classified from #snipes. Rows are the sniper, columns are the victim.',
+   manual: 'Editable — your own corrections on top of the coded matrix. Positive = a snipe the bot missed; negative = correcting an over-count. Never touched by sync.',
+-  true: 'Editable — Coded + Manual combined. This is what Snipes/Sniped feed into Score. Editing a cell saves the difference to the Manual matrix.',
++  true: 'Editable live — Coded + Manual combined. Edit any cell, a person’s Adjustment, or their Score (the big number): totals and scores update as you go. Editing a cell saves the difference to the Manual matrix; editing a Score saves the Adjustment needed to reach it.',
+ };
++const VIEWS = ['coded', 'manual', 'true'];
++const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
++const round2 = (n) => Math.round(n * 100) / 100;
++/** Find an element by a data attribute without building a CSS selector from user data. */
++const find = (root, sel, attr, id) => $$(sel, root).find((n) => n.dataset[attr] === id);
+ 
+ export function mount(panel) {
+   let view = 'coded';
+-  const tabs = ['coded', 'manual', 'true'].map((v) => el('button', {
++  const tabs = VIEWS.map((v) => el('button', {
+     type: 'button', class: 'matrix-subtab-btn' + (v === view ? ' active' : ''), text: v[0].toUpperCase() + v.slice(1),
+-    onclick: () => { view = v; tabs.forEach((t) => t.classList.toggle('active', t === tabs[['coded', 'manual', 'true'].indexOf(v)])); load(); },
++    onclick: () => { view = v; tabs.forEach((t, i) => t.classList.toggle('active', VIEWS[i] === v)); load(); },
+   }));
+   const refresh = el('button', { type: 'button', class: 'btn', text: 'Refresh', onclick: () => load() });
+   const zoom = el('input', { type: 'range', min: '60', max: '160', value: '100', step: '10' });
+@@ -21,37 +26,99 @@ export function mount(panel) {
+   panel.append(el('div', { class: 'review-controls' }, el('div', { class: 'matrix-subtabs' }, ...tabs), refresh,
+     el('label', { class: 'review-mode-label' }, 'Zoom ', zoom)), caption, wrap);
+ 
++  /** Recompute every total and score from what is currently typed in the cells. */
++  function recalc() {
++    const rows = {}, cols = {};
++    $$('.cell-input', wrap).forEach((i) => {
++      const n = num(i.value);
++      rows[i.dataset.sniper] = (rows[i.dataset.sniper] || 0) + n;
++      cols[i.dataset.victim] = (cols[i.dataset.victim] || 0) + n;
++    });
++    $$('[data-rt]', wrap).forEach((c) => { c.textContent = rows[c.dataset.rt] || 0; });
++    $$('[data-ct]', wrap).forEach((c) => { c.textContent = cols[c.dataset.ct] || 0; });
++    $$('.score-input', wrap).forEach((s) => {
++      if (document.activeElement === s) return;
++      const id = s.dataset.user, adj = find(wrap, '.adj-input', 'user', id);
++      s.value = round2((rows[id] || 0) - (cols[id] || 0) + num(adj?.value));
++    });
++  }
++
++  async function save(input, path, body, revert) {
++    input.disabled = true;
++    try { await api(path, { method: 'POST', body }); return true; }
++    catch (err) { alert(`Couldn't save: ${err.message}`); revert(); return false; }
++    finally { input.disabled = false; }
++  }
++
+   async function load() {
+     caption.textContent = CAPTIONS[view];
+     render(wrap, 'Loading…');
+     const d = await api(`/matrix/${view}`);
+     if (!d.users.length) { render(wrap, empty('No one on the roster yet.')); return; }
++    const full = view === 'true';
+     render(wrap, html`
+       <table class="matrix-table">
+-        <thead><tr><th>Sniper \\ Victim</th><th>Snipes</th>${d.users.map((u) => html`<th>${u.display}</th>`)}</tr></thead>
+-        <tbody>${d.users.map((row) => html`<tr><td>${row.display}</td><td class="row-total">${d.row_totals[row.id] || 0}</td>
++        <thead><tr><th>Sniper \\ Victim</th><th>Snipes</th>${d.users.map((u) => html`<th>${u.display}</th>`)}
++          ${full ? html`<th>Sniped</th><th>Adjustment</th><th>Score</th>` : ''}</tr></thead>
++        <tbody>${d.users.map((row) => html`<tr><td>${row.display}</td><td class="row-total" data-rt="${row.id}">${d.row_totals[row.id] || 0}</td>
+           ${d.users.map((col) => {
+             if (row.id === col.id) return html`<td></td>`;
+             const n = (d.cells[row.id] || {})[col.id] || 0;
+             return d.editable
+               ? html`<td><input type="text" inputmode="numeric" class="cell-input" data-sniper="${row.id}" data-victim="${col.id}" value="${n}"></td>`
+               : html`<td>${n || ''}</td>`;
+-          })}</tr>`)}</tbody>
+-        <tfoot><tr><td>Sniped (total)</td><td></td>${d.users.map((u) => html`<td class="row-total">${d.col_totals[u.id] || 0}</td>`)}</tr></tfoot>
++          })}
++          ${full ? html`<td class="row-total" data-ct="${row.id}">${d.col_totals[row.id] || 0}</td>
++            <td><input type="text" inputmode="decimal" class="cell-input adj-input" data-user="${row.id}" value="${d.adjustments[row.id] || 0}"></td>
++            <td><input type="text" inputmode="decimal" class="cell-input score-input big-number" data-user="${row.id}"
++              value="${round2((d.row_totals[row.id] || 0) - (d.col_totals[row.id] || 0) + (d.adjustments[row.id] || 0))}"></td>` : ''}
++        </tr>`)}</tbody>
++        <tfoot><tr><td>Sniped (total)</td><td></td>${d.users.map((u) => html`<td class="row-total" data-ct="${u.id}">${d.col_totals[u.id] || 0}</td>`)}
++          ${full ? html`<td></td><td></td><td></td>` : ''}</tr></tfoot>
+       </table>`);
+ 
+-    $$('.cell-input', wrap).forEach((input) => {
++    $$('.cell-input[data-sniper]', wrap).forEach((input) => {
+       let last = input.value;
++      input.addEventListener('input', recalc);                           // live, before saving
+       input.addEventListener('change', async () => {
+         const value = parseInt(input.value, 10);
+-        if (Number.isNaN(value)) { input.value = last; return; }
+-        input.disabled = true;
+-        try {
+-          await api(`/matrix/${view}/cell`, { method: 'POST', body: { sniper: input.dataset.sniper, victim: input.dataset.victim, value } });
+-          last = String(value);
+-        } catch (err) { alert(`Couldn't save: ${err.message}`); }
++        if (Number.isNaN(value)) { input.value = last; recalc(); return; }
++        const ok = await save(input, `/matrix/${view}/cell`,
++          { sniper: input.dataset.sniper, victim: input.dataset.victim, value }, () => { input.value = last; });
++        if (ok) last = String(value);
+         input.value = last;
+-        input.disabled = false;
++        recalc();
++      });
++    });
++
++    $$('.adj-input', wrap).forEach((input) => {
++      let last = input.value;
++      input.addEventListener('input', recalc);
++      input.addEventListener('change', async () => {
++        const value = parseFloat(input.value);
++        if (Number.isNaN(value)) { input.value = last; recalc(); return; }
++        const ok = await save(input, '/adjustments', { user_id: input.dataset.user, adjustment: value }, () => { input.value = last; });
++        if (ok) last = String(value);
++        input.value = last;
++        recalc();
++      });
++    });
++
++    // The big number: typing a Score stores the Adjustment that makes Snipes − Sniped + Adjustment equal it.
++    $$('.score-input', wrap).forEach((input) => {
++      let last = input.value;
++      input.addEventListener('change', async () => {
++        const want = parseFloat(input.value);
++        if (Number.isNaN(want)) { input.value = last; return; }
++        const id = input.dataset.user;
++        const rt = num(find(wrap, '[data-rt]', 'rt', id)?.textContent);
++        const ct = num(find(wrap, '[data-ct]', 'ct', id)?.textContent);
++        const adj = round2(want - (rt - ct));
++        const adjInput = find(wrap, '.adj-input', 'user', id);
++        const ok = await save(input, '/adjustments', { user_id: id, adjustment: adj }, () => { input.value = last; });
++        if (ok) { adjInput.value = adj; }
++        recalc();
++        last = input.value;
+       });
+     });
+   }
+diff --git a/web/static/style.css b/web/static/style.css
+index 10e1f7a..0ce5235 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -303,3 +303,27 @@ tr.no-points td { color: #8d8d8d; font-style: italic; }
+   .focus-media { height: 45vh; }
+   .focus-thread { max-height: 40vh; }
+ }
++
++    /* Matrix: the Score column is the "big number" */
++    .matrix-table input.big-number { width: 5.2em; font-size: 1.1rem; font-weight: 700; color: #ffd54f; }
++    .matrix-table input.adj-input { width: 4.2em; }
++
++    /* Compare tab */
++    .cmp-summary { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
++    .cmp-pill { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 6px 12px; font-size: 0.85rem; color: #bbb; }
++    .cmp-pill b { display: block; font-size: 1.3rem; color: #eee; }
++    .cmp-pill.bad b { color: #ff8a80; } .cmp-pill.good b { color: #81c784; }
++    table.cmp-table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
++    .cmp-table th, .cmp-table td { border-bottom: 1px solid #2a2a2a; padding: 5px 8px; text-align: left; vertical-align: top; }
++    .cmp-table th { color: #999; font-weight: 600; position: sticky; top: 0; background: #151515; }
++    .cmp-table .num { text-align: right; font-variant-numeric: tabular-nums; }
++    .cmp-table tr.resolved td { opacity: 0.5; }
++    .diff-pos { color: #ffb74d; font-weight: 700; } .diff-neg { color: #ff8a80; font-weight: 700; } .diff-zero { color: #81c784; }
++    .cmp-suspect { font-size: 0.8rem; color: #aaa; margin: 2px 0; }
++    .cmp-suspect span.k { color: #6cb6ff; }
++    .cmp-note { color: #aaa; font-size: 0.85rem; margin: 6px 0; }
++    .cmp-textarea { width: 100%; min-height: 120px; background: #1a1a1a; color: #ddd; border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: monospace; }
++    details.logic { background: #1a1a1a; border: 1px solid #2c2c2c; border-radius: 8px; padding: 8px 14px; margin-bottom: 16px; }
++    details.logic summary { cursor: pointer; font-weight: 600; color: #ccc; }
++    details.logic li { margin: 4px 0; color: #bbb; font-size: 0.88rem; }
++    details.logic .order { color: #6cb6ff; font-size: 0.8rem; }
+diff --git a/web/templates/index.html b/web/templates/index.html
+index e252a49..4b15986 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -24,6 +24,7 @@
+       <button class="tab-btn" data-tab="dns">Do Not Snipe</button>
+       <button class="tab-btn" data-tab="analysis">Analysis</button>
+       <button class="tab-btn" data-tab="matrix">Matrix</button>
++      <button class="tab-btn" data-tab="compare">Compare</button>
+       <button class="tab-btn" data-tab="adjustments">Adjustments</button>
+       <button class="tab-btn" data-tab="maintenance">Maintenance</button>
+     </nav>
+@@ -37,6 +38,7 @@
+   <section id="tab-dns" class="tab-content"></section>
+   <section id="tab-analysis" class="tab-content"></section>
+   <section id="tab-matrix" class="tab-content"></section>
++  <section id="tab-compare" class="tab-content"></section>
+   <section id="tab-adjustments" class="tab-content"></section>
+   <section id="tab-maintenance" class="tab-content"></section>
+ 
+-- 
+2.43.0
+

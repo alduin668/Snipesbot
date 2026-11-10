@@ -6,7 +6,7 @@ from pathlib import Path
 from ..db import Database
 from .archive import ArchiveStore, media_files
 from .entries import EntryStore
-from .misc import (Busy, DnsStore, LockStore, NameStore, ScoringStore,
+from .misc import (Busy, DnsStore, HumanStore, LockStore, NameStore, ScoringStore,
                    SettingsStore, TestMessageStore)
 
 __all__ = ["Store", "Busy", "media_files"]
@@ -21,6 +21,7 @@ class Store:
         self.dns = DnsStore(db)
         self.scoring = ScoringStore(db)
         self.names = NameStore(db)
+        self.human = HumanStore(db)
         self.locks = LockStore(db)
         self.tests = TestMessageStore(db)
 
