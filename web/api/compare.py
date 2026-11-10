@@ -6,12 +6,18 @@ import io
 
 from flask import Blueprint, jsonify, request
 
-from ...analysis.compare import compare
+from ...analysis.compare import compare, cutoff_from_meta, parse_cutoff, window
 from ...analysis.stats import Stats
 from ...services import people, roster
 from ..deps import env
 
 bp = Blueprint("compare", __name__)
+
+
+def _cutoff():
+    """The date of the human pass (None until one is saved)."""
+    s = env().store
+    return cutoff_from_meta(s.settings.get(s.human.META_KEY))
 
 
 def _human_users(stats: Stats) -> list:
@@ -31,7 +37,7 @@ def get_compare():
     order = _human_users(stats)
     names = s.names.all()
     h, adj = s.human.matrix(), s.human.adjustments()
-    out = compare(stats, h, adj, names)
+    out = compare(stats, h, adj, names, _cutoff())
     out["users"] = [{"id": u, "display": people.display(u, names)} for u in order]
     out["human_cells"], out["human_adjustments"] = h, adj
     out["meta"] = s.settings.get(s.human.META_KEY) or {"as_of": "", "note": ""}
@@ -74,17 +80,23 @@ def set_human_adjustment():
 
 @bp.post("/compare/human/meta")
 def set_meta():
+    """The date of the human pass (compared through the end of that day) and a note."""
     body = request.get_json(silent=True) or {}
     s = env().store
-    s.settings.set(s.human.META_KEY, {"as_of": str(body.get("as_of") or "")[:40], "note": str(body.get("note") or "")[:2000]})
+    raw = str(body.get("as_of") or "").strip()[:40]
+    if raw:
+        try:
+            raw = parse_cutoff(raw).isoformat()
+        except ValueError:
+            return jsonify({"error": "Couldn't read that date. Use YYYY-MM-DD or M/D (for example 2026-11-08 or 11/8)."}), 400
+    s.settings.set(s.human.META_KEY, {"as_of": raw, "note": str(body.get("note") or "")[:2000]})
     return jsonify({"ok": True})
 
 
 @bp.post("/compare/human/import")
 def import_matrix():
-    """Paste a matrix copied from a spreadsheet: first row = victim names, first
-    column = sniper names (tab, comma or semicolon separated). Names are matched
-    to the roster; anything unmatched is reported and nothing is saved."""
+    """Simple exact-name paste (kept for compatibility). The Paste / notes tab uses
+    /compare/human/import/preview + /apply, which match names automatically."""
     body = request.get_json(silent=True) or {}
     text = (body.get("text") or "").strip("\n")
     if not text.strip():
@@ -127,10 +139,16 @@ def import_matrix():
 
 
 # ---- remedies: write the fix into the Manual matrix / Adjustments --------------------------------------
+# Every remedy is measured against the bot AS OF the human pass's date, so afterwards today's True is
+# "the human's numbers + the snipes made since": as if the pass had been made that day.
+
+def _window(stats: Stats):
+    return window(stats, _cutoff())
+
 
 def _apply_cell(stats: Stats, sniper: str, victim: str) -> int:
     h = env().store.human.matrix().get(sniper, {}).get(victim, 0)
-    coded = stats.coded_matrix()["cells"].get(sniper, {}).get(victim, 0)
+    coded = _window(stats)[0].get(sniper, {}).get(victim, 0)
     env().store.scoring.set_cell(sniper, victim, h - coded)
     return h - coded
 
@@ -155,12 +173,12 @@ def remedy_adjustment():
 
 @bp.post("/compare/remedy/all")
 def remedy_all():
-    """Make True match the human everywhere, except cells whose victim is on the
+    """Make True match the human as of the pass's date, everywhere, except cells whose victim is on the
     do-not-snipe list (those intentionally score nothing; the human decides by hand)."""
     stats = Stats(env())
     s = env().store
     h, manual, adj_now = s.human.matrix(), s.scoring.matrix(), s.scoring.adjustments()
-    coded = stats.coded_matrix()["cells"]
+    coded = _window(stats)[0]
     users = set(h) | {v for r in h.values() for v in r} | set(manual) | {v for r in manual.values() for v in r}
     users |= set(coded) | {v for r in coded.values() for v in r}
     fixed = skipped = 0
@@ -180,4 +198,6 @@ def remedy_all():
         if (adj_now.get(u, 0) or 0) != human_adj.get(u, 0):
             s.scoring.set_adjustment(u, human_adj.get(u, 0))
             adj_fixed += 1
-    return jsonify({"ok": True, "cells_fixed": fixed, "adjustments_fixed": adj_fixed, "dns_skipped": skipped})
+    cutoff = _cutoff()
+    return jsonify({"ok": True, "cells_fixed": fixed, "adjustments_fixed": adj_fixed, "dns_skipped": skipped,
+                    "as_of": cutoff.isoformat() if cutoff else None})
